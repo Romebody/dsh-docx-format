@@ -1,0 +1,6 @@
+url: https://github.com/GITHUB_USER/dsh-docx-format
+name: GITHUB_USER/dsh-docx-format
+category: docs
+description:
+  en: Normalizes every generated .docx to one Chinese official-document layout with FangZheng XiaoBiaoSong titles, FangSong body at fixed 29pt leading, character-unit first-line indents, fully centered table cells and footer page numbers, and disables itself when the request mentions a lab report.
+  zh: 把生成的 .docx 统一到一套中文公文版式：方正小标宋标题、仿宋正文 29 磅固定行距、字符单位首行缩进、表格单元格全部居中、页脚「— 1 —」页码；请求文字出现「实验报告」时插件整体停用。

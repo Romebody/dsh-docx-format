@@ -1,0 +1,28 @@
+# 依赖与构建产物
+node_modules/
+*.tgz
+*.log
+
+# Python 缓存（引擎是纯标准库脚本，不需要虚拟环境）
+__pycache__/
+*.py[cod]
+.venv/
+
+# 工作区示例与测试产物（本插件仓库不需要这些）
+_out/
+_test/
+_extract/
+*.tmp.docx
+~$*.docx
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地凭据
+.env
+.env.*
+*.pem

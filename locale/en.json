@@ -1,0 +1,18 @@
+{
+  "meta": {
+    "title": "Official document formatting",
+    "description": "Auto-apply the general official document format to every generated .docx."
+  },
+  "title": "Docx format",
+  "toolName": "docx_format",
+  "applied": "normalized",
+  "clean": "already compliant",
+  "violations": "deviations",
+  "skipped": "skipped (allowlist)",
+  "skipReason": "request mentions the lab-report keyword, plugin disabled",
+  "config": {
+    "skipRequestKeywords": "request-text allowlist; a hit disables the whole plugin, default ['实验报告']",
+    "autoFormat": "queue any .docx path seen in tool results",
+    "formatExisting": "also normalize files created before the plugin loaded"
+  }
+}

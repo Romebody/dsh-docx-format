@@ -1,0 +1,18 @@
+{
+  "meta": {
+    "title": "公文格式规范化",
+    "description": "生成的 .docx 自动套用通用公文格式规范（字体、字号、行距、缩进、页边距、表格、页码、落款）。"
+  },
+  "title": "公文格式",
+  "toolName": "docx_format",
+  "applied": "已规范化",
+  "clean": "无需修改",
+  "violations": "格式偏差",
+  "skipped": "已跳过（白名单）",
+  "skipReason": "请求文字含「实验报告」，插件停用",
+  "config": {
+    "skipRequestKeywords": "用户请求文字白名单：命中则整个插件停用，默认「实验报告」",
+    "autoFormat": "工具结果里出现 .docx 时自动排队规范化",
+    "formatExisting": "是否处理插件加载前就存在的旧文件"
+  }
+}

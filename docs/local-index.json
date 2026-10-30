@@ -1,0 +1,31 @@
+{
+  "format": 1,
+  "title": {
+    "en": "Romebody plugins",
+    "zh": "自用插件源"
+  },
+  "plugins": [
+    {
+      "name": "dsh-docx-format",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/GITHUB_USER/dsh-docx-format"
+      },
+      "metadata": {
+        "category": "docs",
+        "description": {
+          "en": "Normalizes every generated .docx to one Chinese official-document layout.",
+          "zh": "把生成的 .docx 统一到一套中文公文版式。"
+        }
+      },
+      "versions": [
+        {
+          "version": "1.0.0",
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    }
+  ]
+}

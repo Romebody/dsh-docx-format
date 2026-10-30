@@ -1,0 +1,37 @@
+# dsh-docx-format —— 公文格式规范化
+# 安装方式（把 <PLUGIN_DIR> 换成插件所在目录）：
+#   1) profile 的 package.json dependencies 加 "dsh-docx-format": "link:<PLUGIN_DIR>"
+#      （已发布到 npm 时直接写版本号，如 "dsh-docx-format": "^1.0.0"）
+#   2) dsh.profile.bundles 追加 "dsh-docx-format"
+#   3) 重启 dsh
+- insert:
+    - id: docx-format
+      name: 'dsh-docx-format'
+      config:
+        # 自动规范化：任何工具结果里出现 .docx 路径都会排队处理
+        autoFormat: true
+        # 只处理插件加载之后新写的文件；true 则连旧文件一起改（有备份需求时改这个）
+        formatExisting: false
+        debounceMs: 1200
+        timeoutMs: 120000
+        # 显式指定 python；留空则自动找 .dsh 自带运行时
+        python: ''
+        skipPatterns:
+          - '*格式要求*'
+          - '*模板*'
+          - '~$*'
+          - '*/node_modules/*'
+        # 用户请求文字白名单：本条请求（会话最后一条用户消息）命中即整个插件停用
+        # 例：用户说“写个实验报告” → 不套公文格式、不自动改文件
+        skipRequestKeywords:
+          - '实验报告'
+        prompt:
+          enabled: true
+          order: 3260
+        tool:
+          enabled: true
+        # 覆盖 docxfmt.py 的 DEFAULTS，例如：
+        # defaults:
+        #   linePt: 28
+        #   signature:
+        #     seal: true
