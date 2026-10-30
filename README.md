@@ -114,6 +114,18 @@ python lib/docx_read.py 毕业论文.docx --offset 2000 --json
 
 ## 安装
 
+### 方式一：从 npm 安装（推荐）
+
+已发布为 [`dsh-docx-format`](https://www.npmjs.com/package/dsh-docx-format)：
+
+```bash
+dsh plugin --profile <profile> add dsh-docx-format
+```
+
+收录进插件市场后，也可以直接在市场里搜 `docx` 点安装。
+
+### 方式二：本地目录（开发调试）
+
 1. 把 `dsh-docx-format` 整个目录放到任意位置（记为 `<PLUGIN_DIR>`）。
 2. profile 的 `package.json` 里 `dependencies` 增加 `"dsh-docx-format": "link:<PLUGIN_DIR>"`；
    已发布到 npm 时直接写版本号，如 `"dsh-docx-format": "^1.0.0"`。
