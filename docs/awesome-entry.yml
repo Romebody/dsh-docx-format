@@ -1,5 +1,5 @@
-url: https://github.com/GITHUB_USER/dsh-docx-format
-name: GITHUB_USER/dsh-docx-format
+url: https://github.com/Romebody/dsh-docx-format
+name: Romebody/dsh-docx-format
 category: docs
 description:
   en: Normalizes every generated .docx to one Chinese official-document layout with FangZheng XiaoBiaoSong titles, FangSong body at fixed 29pt leading, character-unit first-line indents, fully centered table cells and footer page numbers, and disables itself when the request mentions a lab report.

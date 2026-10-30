@@ -14,13 +14,13 @@
     "chinese-official-document"
   ],
   "author": "Romebody",
-  "homepage": "https://github.com/GITHUB_USER/dsh-docx-format#readme",
+  "homepage": "https://github.com/Romebody/dsh-docx-format#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/GITHUB_USER/dsh-docx-format.git"
+    "url": "git+https://github.com/Romebody/dsh-docx-format.git"
   },
   "bugs": {
-    "url": "https://github.com/GITHUB_USER/dsh-docx-format/issues"
+    "url": "https://github.com/Romebody/dsh-docx-format/issues"
   },
   "publishConfig": {
     "access": "public"

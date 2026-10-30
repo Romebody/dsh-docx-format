@@ -1,10 +1,10 @@
 # PR：把 dsh-docx-format 收录进插件目录
 
 打开 https://github.com/awesome-dsh-plugin/awesome-dsh-plugin → Fork，
-在新仓库里新建文件 `data/plugins/GITHUB_USER__dsh-docx-format.yml`，
+在新仓库里新建文件 `data/plugins/Romebody__dsh-docx-format.yml`，
 内容直接复制 `docs/awesome-entry.yml`（脚本 `tools/publish_market.sh` 可全自动完成，含开 PR）。
 
-- 标题：`Add GITHUB_USER/dsh-docx-format`
+- 标题：`Add Romebody/dsh-docx-format`
 - 正文：见下方（可直接粘贴）
 - 一个 PR 只提这一条；README 由脚本生成，不要手工改
 
