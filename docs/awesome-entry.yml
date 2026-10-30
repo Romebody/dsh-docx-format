@@ -1,6 +1,9 @@
 url: https://github.com/Romebody/dsh-docx-format
 name: Romebody/dsh-docx-format
 category: docs
+# 预构建 tgz（资产名不带版本号，latest/download 才能长期有效）
+# 若之后发布了 npm 包可删掉这一行，市场默认走 npm
+tarball: https://github.com/Romebody/dsh-docx-format/releases/latest/download/dsh-docx-format.tgz
 description:
   en: Normalizes every generated .docx to one Chinese official-document layout with FangZheng XiaoBiaoSong titles, FangSong body at fixed 29pt leading, character-unit first-line indents, fully centered table cells and footer page numbers, and disables itself when the request mentions a lab report.
   zh: 把生成的 .docx 统一到一套中文公文版式：方正小标宋标题、仿宋正文 29 磅固定行距、字符单位首行缩进、表格单元格全部居中、页脚「— 1 —」页码；请求文字出现「实验报告」时插件整体停用。
