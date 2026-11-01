@@ -8,10 +8,11 @@
   "applied": "已规范化",
   "clean": "无需修改",
   "violations": "格式偏差",
-  "skipped": "已跳过（白名单）",
-  "skipReason": "请求文字含「实验报告」，插件停用",
+  "skipped": "已跳过（未提公文或命中排除词）",
+  "skipReason": "本条请求不套公文版式（未提「公文」或命中排除词）",
   "config": {
-    "skipRequestKeywords": "用户请求文字白名单：命中则整个插件停用，默认「实验报告」",
+    "triggerKeywords": "触发词：用户请求文字必须含其中之一才套公文版式，默认「公文」",
+    "skipRequestKeywords": "排除词：命中则整个插件停用，默认「实验报告」",
     "autoFormat": "工具结果里出现 .docx 时自动排队规范化",
     "formatExisting": "是否处理插件加载前就存在的旧文件"
   }

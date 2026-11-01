@@ -42,9 +42,12 @@
    并给出 `附件自动分段不可用` 的提示，折行留给使用者手工换行。
    条目文字短于 `attachSplit.minCharsToMeasure`（默认 20 字）时不可能折行，直接跳过、不启动 Word
    （省 3~6 秒；短附件因此仍是 0.2 秒级的体检）。
-3. **请求文字白名单 + 默认不写落款**
-   - 白名单：看**当前会话最后一条用户消息**，命中 `skipRequestKeywords`（默认 `["实验报告"]`）就整条请求停用插件——
-     `tools/result` 钩子不排队、队列里的任务出队时再判一次、`docx_format` 直接返回 `skipped`（要强制处理传 `force=true`）。
+3. **请求门控（先触发、再排除）+ 默认不写落款**
+   - 触发：看**当前会话最后一条用户消息**，必须命中 `triggerKeywords`（默认 `["公文"]`）才套版式。
+     没提「公文」的请求（写周报、排简历、随便导出个 docx）整条停用插件，文件保持原样；
+     `triggerKeywords` 置成空数组表示任何请求都触发（旧行为）。
+   - 排除：命中 `skipRequestKeywords`（默认 `["实验报告"]`）时同样停用。
+   - 停用 = `tools/result` 钩子不排队、队列里的任务出队时再判一次、`docx_format` 直接返回 `skipped`（要强制处理传 `force=true`）。
      会话文字从 `sessions` 服务的 `session.deriveMessages()` 取，另有 `session/event` 缓存兜底。
    - 落款：提示词明确「用户没要求署名/日期就不写落款」；引擎只格式化**文档里已经存在**的落款，绝不凭空新增。
 4. **表格单元格完全水平居中**
@@ -58,6 +61,13 @@
 - 大标题 方正小标宋简体 二号(22pt)，居中；标题上方空 2 行、下方空 1 行——用**两个 / 一个空段落**表达。
 - 一级标题 黑体三号、二级标题 楷体三号、三级标题 仿宋三号；编号「一、」「（一）」「1．」（全角点，无尾随空格）。
 - 数字与字母一律 Times New Roman；破折号 `——` 用 TNR；小数点半角。
+- 中英混排：中文内容里的英文单词或缩写（AI、PPT、OA、Word）**前后不加空格**——写「使用AI工具」「OA系统」「Word文档」；
+  正常的英文句子仍按英文习惯加空格（`Please submit the form by Friday.`）。中英混排的英文用 Times New Roman。
+  引擎里由 `normalize.cjkLatinSpace`（默认 `true`）处理，正文、各级标题、表标题、表格单元格都会清，
+  规则名 `text.cjkLatinSpace`；数字不算英文，`2026 年` 这种保持原样。
+- 光删空格字符还不够：Word 默认开着「自动调整中文与西文/数字的间距」，没有空格也看着像有空格。
+  引擎会给每个段落写 `w:autoSpaceDE="0" w:autoSpaceDN="0"`（规则名 `par.autoSpace`），
+  PDF 里实测 `的AI素养`、`OA系统`、`Word文档` 之间已无空隙。
 - 表格：标题 方正小标宋简体二号；表头 黑体小四、表内容 仿宋小四；**所有单元格段落水平+垂直居中**、单倍行距；外边框 1.5 磅、内边框 0.5 磅；行高最小值 0.7cm；表格居中无环绕；两字词语中间加两个半角空格（`姓  名`）；表标题与表格之间插一行 0 行高、10.5pt 的空段。
 - 图片：图片单独成段，**居中 + 无缩进（首行/左/右/悬挂全 0）+ 单倍行距**（`w:line="240" w:lineRule="auto"`，
   不走 29 磅固定值，避免图片被裁或行高被拉死），段前段后仍 0；判定规则 `par.lineSingle`。
@@ -78,7 +88,7 @@ python lib/docxfmt.py 报告.docx --mode check          # 只体检，有偏差�
 python lib/docxfmt.py 报告.docx --mode apply          # 规范化并原子写回
 python lib/docxfmt.py ./docs --mode apply --recursive # 批量
 python lib/docxfmt.py 报告.docx --mode check --json   # 机器可读报告
-# 临时关掉内容白名单
+# 临时关掉引擎侧内容白名单
 python lib/docxfmt.py 报告.docx --mode apply --config '{"skipContentKeywords":[]}'
 ```
 
@@ -148,7 +158,8 @@ dsh plugin --profile <profile> add dsh-docx-format
 | `timeoutMs` | `120000` | 单次 python 超时 |
 | `python` | `''` | 显式解释器；空则用 `DSH_DOCX_PYTHON` → `~/.dsh/dsh-runtimes/.../python.exe` → PATH |
 | `skipPatterns` | `*格式要求*` 等 | 通配符匹配文件路径，命中不自动改（防止改到格式规范原件） |
-| `skipRequestKeywords` | `['实验报告']` | **请求文字白名单**：会话最后一条用户消息含该词就整条请求停用插件 |
+| `triggerKeywords` | `['公文']` | **触发词**：会话最后一条用户消息必须含其中之一才介入；空数组 = 任何请求都触发 |
+| `skipRequestKeywords` | `['实验报告']` | **排除词**：会话最后一条用户消息含该词就整条请求停用插件 |
 | `maxFilesPerTurn` | `8` | 一轮最多自动处理几个文件 |
 | `prompt.enabled / order` | `true / 3260` | 提示词段开关与排序 |
 | `defaults` | `{}` | 透传给 docxfmt.py，覆盖任何 DEFAULTS（如 `linePt`、`signature.seal`、`skipContentKeywords`） |
@@ -181,13 +192,16 @@ dsh-docx-format/
 ## 排查
 
 - 没生效：重启 dsh；再看日志里有没有 `[docx-format] ready python=... whitelist=[...]`。
-- 明明该格式化却没动：看日志有没有 `whitelist hit 「实验报告」` / `skip ... 请求文字含...`；那是白名单在生效，用 `force=true` 绕过。
+- 明明该格式化却没动：看日志有没有 `排除词命中「实验报告」` / `本条请求未提「公文」`；那是白名单在生效，用 `force=true` 绕过。
 - `无法启动 python`：在配置里写死 `python` 路径。
 - 旧文件不自动改：默认 `formatExisting: false`，用 `docx_format` 指定文件，或把它改成 `true`。
 - 只想看问题：`docx_format(mode="check")` 打印逐条 `规则 x次数 where 当前 -> 期望`。
 - 自测：`node tools/smoke_whitelist.mjs`（工作区根目录），`python tools/smoke_attach_split.py`
   （附件 2/6/5/6 阶梯 + Word 实测每段一行 + 幂等），`python tools/smoke_blank_fmt.py`
   （空段落字体/字号/对齐/缩进是否与前后文一致、幂等），`python tools/smoke_image_line.py`
-  （图片段居中/无缩进/单倍行距、正文仍是 29 磅、幂等），`python tools/verify_v2.py <docx> -v` 逐段核对 OOXML。
+  （图片段居中/无缩进/单倍行距、正文仍是 29 磅、幂等），`python tools/smoke_cjk_space.py`
+  （中英混排去空格 + 英文句子保持 + 表格单元格 + 幂等），`python tools/verify_v2.py <docx> -v` 逐段核对 OOXML。
+- 中英之间还看着空：Word 的「自动调整中西文间距」没关。看 `docx_format(mode="check")` 里的 `par.autoSpace`，
+  `apply` 会给段落补 `w:autoSpaceDE="0" w:autoSpaceDN="0"`。
 - 空行看起来“比手工回车矮/宽”：那是空段落没继承前后文字体。用 `docx_format(mode="check")` 看 `blank.mark`，
   它会给出“当前字体/字号/对齐 -> 期望值”，`apply` 会就地重写段落标记的 `w:pPr/w:rPr`。

@@ -6,8 +6,11 @@
  *  2) systemPrompt 段：把格式硬规则写进提示词，模型一开始就知道该怎么排版。
  *  3) tools/result 观察者：任何工具产出 .docx 路径后，自动排队规范化（默认只处理本次会话新写的文件）。
  *
- * 白名单（本版新增）：当前会话最后一条用户消息命中 skipRequestKeywords（默认「实验报告」）时，
- * 整个插件不介入 —— 不排队、不改文件、工具调用直接返回 skipped。
+ * 请求门控（两段式）：
+ *  - 触发：当前会话最后一条用户消息必须命中 triggerKeywords（默认「公文」），否则整个插件不介入；
+ *    所以普通对话里生成的 .docx 不会被套上公文版式。
+ *  - 排除：命中 skipRequestKeywords（默认「实验报告」）时同样不介入。
+ * 不介入 = 不排队、不改文件、工具调用直接返回 skipped（显式调用传 force=true 可绕过门控）。
  *
  * 真实排版逻辑在 lib/docxfmt.py（python-docx），本文件只做进程调用与调度。
  */
@@ -32,7 +35,9 @@ const DEFAULTS = {
   python: '',
   maxFilesPerTurn: 8,
   skipPatterns: ['*格式要求*', '*模板*', '~$*', '*/node_modules/*'],
-  // 用户请求文字白名单：命中即整个插件不运行（不是只跳过某个文件）
+  // 触发词：用户请求文字里必须出现其中之一，插件才介入（空数组 = 任何请求都触发）
+  triggerKeywords: ['公文'],
+  // 排除词：命中即整个插件不运行（如「实验报告」这类不该套公文版式的请求）
   skipRequestKeywords: ['实验报告'],
   prompt: { enabled: true, order: 3260 },
   tool: { enabled: true },
@@ -44,9 +49,11 @@ const DEFAULTS = {
 function normalizeConfig(config) {
   const cfg = { ...DEFAULTS, ...(config ?? {}) }
   cfg.skipPatterns = Array.isArray(cfg.skipPatterns) ? cfg.skipPatterns.map(String) : DEFAULTS.skipPatterns
-  cfg.skipRequestKeywords = Array.isArray(cfg.skipRequestKeywords)
-    ? cfg.skipRequestKeywords.map(String).map((s) => s.trim()).filter(Boolean)
-    : DEFAULTS.skipRequestKeywords
+  const toKeywords = (value, fallback) => (Array.isArray(value)
+    ? value.map(String).map((s) => s.trim()).filter(Boolean)
+    : fallback)
+  cfg.triggerKeywords = toKeywords(cfg.triggerKeywords, DEFAULTS.triggerKeywords)
+  cfg.skipRequestKeywords = toKeywords(cfg.skipRequestKeywords, DEFAULTS.skipRequestKeywords)
   cfg.prompt = { ...DEFAULTS.prompt, ...(config?.prompt ?? {}) }
   cfg.tool = { ...DEFAULTS.tool, ...(config?.tool ?? {}) }
   cfg.defaults = config?.defaults && typeof config.defaults === 'object' ? config.defaults : {}
@@ -322,13 +329,21 @@ export function apply(ctx, config) {
     return requestCache.get(sessionId)?.text ?? ''
   }
 
-  /** 命中白名单则返回 { keyword, text }，否则 undefined。 */
-  const requestWhitelistHit = (sessionId) => {
-    if (cfg.skipRequestKeywords.length === 0) return undefined
+  /**
+   * 请求门控：决定这条请求要不要套公文格式。
+   *  - 先看排除词（skipRequestKeywords，默认「实验报告」）→ 命中则停用；
+   *  - 再看触发词（triggerKeywords，默认「公文」）→ 非空且未命中则停用；
+   *  - 两者都过 → 返回 { run: true }。
+   */
+  const requestGate = (sessionId) => {
     const text = requestTextOf(sessionId)
-    const keyword = matchKeyword(text, cfg.skipRequestKeywords)
-    if (!keyword) return undefined
-    return { keyword, text }
+    const skip = matchKeyword(text, cfg.skipRequestKeywords)
+    if (skip) return { run: false, kind: 'skip', keyword: skip, text }
+    if (cfg.triggerKeywords.length > 0) {
+      const trigger = matchKeyword(text, cfg.triggerKeywords)
+      if (!trigger) return { run: false, kind: 'no-trigger', text }
+    }
+    return { run: true, text }
   }
 
   /* ---- 文件排队 ---- */
@@ -378,10 +393,12 @@ export function apply(ctx, config) {
       let handled = 0
       while (queue.length > 0 && handled < cfg.maxFilesPerTurn) {
         const job = queue.shift()
-        // 出队时再判一次白名单：用户可能在这期间改了要求
-        const hit = requestWhitelistHit(job.sessionId)
-        if (hit) {
-          log('info', '[docx-format] skip ' + job.file + ' — 请求文字含「' + hit.keyword + '」')
+        // 出队时再判一次门控：用户可能在这期间改了要求
+        const gate = requestGate(job.sessionId)
+        if (!gate.run) {
+          log('info', '[docx-format] skip ' + job.file + ' — ' + (gate.kind === 'skip'
+            ? ('请求文字含排除词「' + gate.keyword + '」')
+            : '请求文字未提触发词「' + cfg.triggerKeywords.join('|') + '」'))
           continue
         }
         formattedByUs.add(job.file)
@@ -463,7 +480,8 @@ export function apply(ctx, config) {
       '固定行距 29 磅、首行缩进 2 字符（w:firstLineChars）、段前段后 0 磅、页边距 3.6/3.0/2.7/2.7cm、',
       '表格单元格水平垂直居中与“— 1 —”页码。',
       'mode=apply 直接改文件（幂等，可重复调用）；mode=check 只报告偏差不改文件。',
-      '用户请求含“实验报告”等白名单关键词时插件整体停用，本工具会直接返回 skipped；确实需要格式化时传 force=true。',
+      '仅在用户对话里提到「公文」（triggerKeywords）时插件才介入，未提到时直接返回 skipped；',
+      '请求里出现「实验报告」等排除词时同样停用。确需强制格式化时传 force=true。',
     ].join(''),
     parameters: {
       type: 'object',
@@ -471,7 +489,7 @@ export function apply(ctx, config) {
         path: { type: 'string', description: '要处理的 .docx 文件或目录（绝对路径最稳）。' },
         mode: { type: 'string', enum: ['apply', 'check'], description: 'apply=规范化并写回；check=只体检。默认 apply。' },
         recursive: { type: 'boolean', description: 'path 是目录时是否递归子目录。默认 false。' },
-        force: { type: 'boolean', description: '忽略请求文字白名单强制处理。默认 false。' },
+        force: { type: 'boolean', description: '忽略请求触发/排除词强制处理。默认 false。' },
       },
       required: ['path'],
       additionalProperties: false,
@@ -489,9 +507,11 @@ export function apply(ctx, config) {
       const file = resolveCandidate(target)
       if (!existsSync(file)) throw new Error('docx_format: 路径不存在 ' + file)
       if (args?.force !== true) {
-        const hit = requestWhitelistHit(exec?.agent?.id)
-        if (hit) {
-          const reason = '请求文字含白名单关键词「' + hit.keyword + '」，本插件停用'
+        const gate = requestGate(exec?.agent?.id)
+        if (!gate.run) {
+          const reason = gate.kind === 'skip'
+            ? '请求文字含排除词「' + gate.keyword + '」，本插件停用'
+            : '请求文字未提到「' + cfg.triggerKeywords.join('|') + '」，本插件停用（确需格式化请传 force=true）'
           log('info', '[docx-format] tool skip ' + file + ' — ' + reason)
           return { ok: true, path: file, mode, changed: 0, violations: 0, fixes: 0,
             changedFiles: 0, skipped: 1, skipReason: reason, warnings: [], files: [] }
@@ -660,8 +680,17 @@ export function apply(ctx, config) {
     '  引擎（Word/WPS）不可用时退回“首行缩进 2/5 字符、不自动拆段”，折行留给使用者手工换行。',
     '  文件末尾「附件1」黑体三号、无缩进、无冒号，其下与附件标题空一行。',
     '',
-    '### 白名单',
+    '### 触发与白名单',
+    '- 只有用户在这条要求里明确提到「公文」（如「按公文格式写一份通知」）时，才套用上面这套版式。',
+    '- 用户没提公文时，不要主动套公文格式，按普通文档/报告排版。',
     '- 用户这条要求里出现「实验报告」时，本插件整体停用：不要套用公文格式，按普通报告排版（可直接用默认样式）。',
+    '',
+    '### 中英混排（与是否公文无关，一律适用）',
+    '- 中文内容里出现的英文单词或缩写（如 AI、PPT、OA、Word）前后**不加空格**：写「使用AI工具」「OA系统」「Word文档」。',
+    '- 正常的英文句子、英文段落仍按英文习惯加空格：「Please submit the form by Friday.」。',
+    '- 中英混排的英文用 Times New Roman；中文用仿宋（标题按各自规定）。',
+    '- 段落里不要开「自动调整中文与西文/数字的间距」（`w:autoSpaceDE` / `w:autoSpaceDN` 置 0），',
+    '  否则即使没有空格字符，渲染出来仍像「使用 AI 工具」。',
     '',
     '生成 docx 之后，若不确定版面，调用 docx_format（mode=check 先体检，mode=apply 修复）。',
     '',
@@ -710,9 +739,11 @@ export function apply(ctx, config) {
           if (exec?.name === 'docx_format') return
           if (result?.isError === true) return
           const sessionId = exec?.agent?.id
-          const hit = requestWhitelistHit(sessionId)
-          if (hit) {
-            log('info', '[docx-format] whitelist hit 「' + hit.keyword + '」 — 本条请求不自动格式化')
+          const gate = requestGate(sessionId)
+          if (!gate.run) {
+            log('info', '[docx-format] ' + (gate.kind === 'skip'
+              ? ('排除词命中「' + gate.keyword + '」')
+              : '本条请求未提「公文」') + ' — 不自动格式化')
             return
           }
           for (const candidate of extractDocxPaths(exec, result)) enqueue(candidate, sessionId)
@@ -725,5 +756,6 @@ export function apply(ctx, config) {
 
   log('info', '[docx-format] ready python=' + python
     + ' autoFormat=' + cfg.autoFormat
-    + ' whitelist=' + JSON.stringify(cfg.skipRequestKeywords))
+    + ' trigger=' + JSON.stringify(cfg.triggerKeywords)
+    + ' skip=' + JSON.stringify(cfg.skipRequestKeywords))
 }

@@ -8,10 +8,11 @@
   "applied": "normalized",
   "clean": "already compliant",
   "violations": "deviations",
-  "skipped": "skipped (allowlist)",
-  "skipReason": "request mentions the lab-report keyword, plugin disabled",
+  "skipped": "skipped (no trigger keyword / excluded)",
+  "skipReason": "official-document formatting not applied (no trigger keyword or excluded)",
   "config": {
-    "skipRequestKeywords": "request-text allowlist; a hit disables the whole plugin, default ['实验报告']",
+    "triggerKeywords": "trigger words; the request text must contain one of them, default ['公文']",
+    "skipRequestKeywords": "exclusion words; a hit disables the whole plugin, default ['实验报告']",
     "autoFormat": "queue any .docx path seen in tool results",
     "formatExisting": "also normalize files created before the plugin loaded"
   }

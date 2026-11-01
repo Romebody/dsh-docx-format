@@ -94,6 +94,8 @@ DEFAULTS = {
         "twoCharCellSpace": True,
         "dashFont": True,
         "boldOff": True,
+        # 中文内容里英文前后不留空格（「使用AI工具」）；纯英文语句的空格保持原样
+        "cjkLatinSpace": True,
     },
 }
 
@@ -251,6 +253,13 @@ IND_SUCCESSORS = ("w:contextualSpacing", "w:mirrorIndents", "w:suppressOverlap",
 
 IND_CHAR_ATTRS = ("w:firstLineChars", "w:leftChars", "w:rightChars",
                   "w:hangingChars", "w:hanging")
+
+# w:autoSpaceDE / autoSpaceDN 的 schema 后继元素（必须插在它们之前）
+AUTOSPACE_SUCCESSORS = ("w:bidi", "w:adjustRightInd", "w:snapToGrid", "w:spacing",
+                        "w:ind", "w:contextualSpacing", "w:mirrorIndents",
+                        "w:suppressOverlap", "w:jc", "w:textDirection",
+                        "w:textAlignment", "w:textboxTightWrap", "w:outlineLvl",
+                        "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange")
 
 # 空段落有两种：正文侧（沿用仿宋三号正文格式）与标题侧（沿用方正小标宋二号居中）
 BLANK_KINDS = ("blank", "blank_title")
@@ -615,6 +624,9 @@ def style_par(par, kind, report, label, cfg):
         report.want("par.rightIndent", label, cur_right, 0,
                     (lambda: setattr(pf, "right_indent", None)))
 
+    # 中英文之间不留自动间距（否则没有空格字符也看着像有空格）
+    auto_space_off(par, report, label)
+
     if par.runs:
         style_runs(par, want_font, want_size, fonts["latin"], report, label, cfg)
 
@@ -715,6 +727,110 @@ def _clear_indent_chars(par, report, label, kind, first_chars=0.0):
 
 
 # ---------------------------------------------------------------- 文本规范化
+CJK_PUNCT = "，。、；：？！“”‘’（）【】《》〈〉「」『』…—～·　"
+ASCII_LATIN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+ASCII_SPACE = " \t\u3000"
+
+
+def is_cjk_char(ch):
+    """汉字或中文标点。"""
+    if not ch:
+        return False
+    if ch in CJK_PUNCT:
+        return True
+    return "\u4e00" <= ch <= "\u9fff" or "\u3400" <= ch <= "\u4dbf"
+
+
+def is_latin_char(ch):
+    return bool(ch) and ch in ASCII_LATIN
+
+
+ALNUM_CHARS = ASCII_LATIN + "0123456789"
+
+
+def _token_bounds(text, pos, step):
+    """从 pos 起沿 step 方向吃掉连续的字母数字，返回区间 [start, end)。"""
+    i = pos
+    while 0 <= i < len(text) and text[i] in ALNUM_CHARS:
+        i += step
+    return (i + 1, pos + 1) if step < 0 else (pos, i)
+
+
+def _token_has_latin(text, start, end):
+    return any(ch in ASCII_LATIN for ch in text[start:end])
+
+
+def cjk_latin_gaps(text):
+    """中文与英文之间的空白区间 [(start, end)]；纯中文/纯数字相邻不返回。
+
+    英文按“词”判定：含字母的字母数字串（AI、Word、5G、A4）算英文，
+    纯数字（2026）不算，所以「2026 年」保持不变。
+    """
+    gaps = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] not in ASCII_SPACE:
+            i += 1
+            continue
+        j = i
+        while j < n and text[j] in ASCII_SPACE:
+            j += 1
+        left_cjk = i > 0 and is_cjk_char(text[i - 1])
+        right_cjk = j < n and is_cjk_char(text[j])
+        left_latin = right_latin = False
+        if i > 0 and text[i - 1] in ALNUM_CHARS:
+            s, e = _token_bounds(text, i - 1, -1)
+            left_latin = _token_has_latin(text, s, e)
+        if j < n and text[j] in ALNUM_CHARS:
+            s, e = _token_bounds(text, j, 1)
+            right_latin = _token_has_latin(text, s, e)
+        if (left_cjk and right_latin) or (left_latin and right_cjk):
+            gaps.append((i, j))
+        i = j
+    return gaps
+
+
+def drop_char_ranges(runs, gaps):
+    """按全局字符位置删除 runs 里对应的字符（空格可能落在任一 run）。"""
+    drop = set()
+    for start, end in gaps:
+        drop.update(range(start, end))
+    pos = 0
+    for run in runs:
+        t = run.text
+        if not t:
+            continue
+        kept = "".join(ch for k, ch in enumerate(t) if (pos + k) not in drop)
+        pos += len(t)
+        if kept != t:
+            run.text = kept
+
+
+def auto_space_off(par, report, label):
+    """关闭 Word 的“自动调整中西文间距”（w:autoSpaceDE / w:autoSpaceDN）。
+
+    Word 默认会在中英文之间自动塞约 1/4 空格：文本里没有空格字符，
+    渲染出来依然像「使用 AI 工具」。要做到真正的“英文前后不加空格”，
+    必须把这两个开关置 0。
+    """
+    pPr = par._p.get_or_add_pPr()
+    for tag in ("w:autoSpaceDE", "w:autoSpaceDN"):
+        el = pPr.find(qn(tag))
+        if el is not None and (el.get(qn("w:val")) or "").lower() in ("0", "false", "off"):
+            continue
+
+        def apply(t=tag, e=el, p=pPr):
+            node = e
+            if node is None:
+                node = OxmlElement(t)
+                p.insert_element_before(node, *AUTOSPACE_SUCCESSORS)
+            node.set(qn("w:val"), "0")
+
+        report.want("par.autoSpace", label,
+                    "开启（Word 自动在中英文之间加间距）", "关闭（autoSpaceDE/DN=0）", apply)
+
+
 def normalize_text(par, report, label, cfg):
     p = par
     text = p.text
@@ -748,6 +864,15 @@ def normalize_text(par, report, label, cfg):
                 report.want("text.attachNumberDot", label, "附件序号半角点/空格", "全角．",
                             (lambda r=run, v=new: setattr(r, "text", v)))
             break
+    if n.get("cjkLatinSpace", True):
+        runs = p.runs
+        joined = "".join(r.text for r in runs)
+        gaps = cjk_latin_gaps(joined)
+        if gaps:
+            report.want("text.cjkLatinSpace", label,
+                        "中文与英文之间夹着空白（共 %d 处）" % len(gaps),
+                        "中文内英文前后不加空格（如「使用AI工具」）",
+                        (lambda rs=runs, gs=gaps: drop_char_ranges(rs, gs)))
 
 
 # ---------------------------------------------------------------- 表格
@@ -837,6 +962,9 @@ def style_table(tbl, report, label, cfg):
             font = fonts["tableHead"] if head else fonts["tableBody"]
             for p_i, par in enumerate(cell.paragraphs):
                 where = "%s.r%d.c%d.p%d" % (label, r_i, c_i, p_i)
+                # 单元格也要处理中英混排（「AI 平台」→「AI平台」）
+                normalize_text(par, report, where, cfg)
+                auto_space_off(par, report, where)
                 pf = par.paragraph_format
                 if pf.line_spacing_rule != WD_LINE_SPACING.SINGLE:
                     report.want("table.lineRule", where, ename(pf.line_spacing_rule), "SINGLE",
@@ -1557,7 +1685,7 @@ def process(path, mode, cfg):
             style_par(obj, kind, report, label, cfg)
             continue
         if kind in ("body", "h1", "h2", "h3", "attach_line", "attach_cont",
-                    "attach_wrap"):
+                    "attach_wrap", "table_caption") or kind.startswith("title"):
             normalize_text(obj, report, label, cfg)
         style_par(obj, kind, report, label, cfg)
         if kind == "sign_org" and cfg["signature"]["enabled"]:
