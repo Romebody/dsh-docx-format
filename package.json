@@ -1,6 +1,6 @@
 {
   "name": "dsh-docx-format",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "type": "module",
   "description": "所有生成的 .docx 自动套用《通用公文格式规范》——工具 + 提示词规则 + 结果钩子。",
   "keywords": [

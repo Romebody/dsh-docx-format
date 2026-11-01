@@ -30,9 +30,9 @@ What it does:
   by Word (`Range.Information(wdFirstCharacterLineNumber)`), producing the
   2 / 6 / 5 / 6 character indent ladder; falls back to 2/5 with no split when
   Word or WPS is unavailable.
-- Skips itself entirely when the request text matches a configured allowlist
-  keyword (defaults to `实验报告` / lab report), and writes no signature block
-  unless the user explicitly asks for one.
+- Only applies the official layout when the request text mentions `公文`
+  (configurable trigger keyword), and writes no signature block unless the
+  user explicitly asks for one.
 
 Notes for reviewers:
 

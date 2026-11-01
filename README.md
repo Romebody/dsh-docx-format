@@ -42,11 +42,10 @@
    并给出 `附件自动分段不可用` 的提示，折行留给使用者手工换行。
    条目文字短于 `attachSplit.minCharsToMeasure`（默认 20 字）时不可能折行，直接跳过、不启动 Word
    （省 3~6 秒；短附件因此仍是 0.2 秒级的体检）。
-3. **请求门控（先触发、再排除）+ 默认不写落款**
+3. **请求门控（只看触发词）+ 默认不写落款**
    - 触发：看**当前会话最后一条用户消息**，必须命中 `triggerKeywords`（默认 `["公文"]`）才套版式。
-     没提「公文」的请求（写周报、排简历、随便导出个 docx）整条停用插件，文件保持原样；
+     没提「公文」的请求（写周报、排简历、导出任何 docx）整条停用插件，文件保持原样；
      `triggerKeywords` 置成空数组表示任何请求都触发（旧行为）。
-   - 排除：命中 `skipRequestKeywords`（默认 `["实验报告"]`）时同样停用。
    - 停用 = `tools/result` 钩子不排队、队列里的任务出队时再判一次、`docx_format` 直接返回 `skipped`（要强制处理传 `force=true`）。
      会话文字从 `sessions` 服务的 `session.deriveMessages()` 取，另有 `session/event` 缓存兜底。
    - 落款：提示词明确「用户没要求署名/日期就不写落款」；引擎只格式化**文档里已经存在**的落款，绝不凭空新增。
@@ -159,7 +158,6 @@ dsh plugin --profile <profile> add dsh-docx-format
 | `python` | `''` | 显式解释器；空则用 `DSH_DOCX_PYTHON` → `~/.dsh/dsh-runtimes/.../python.exe` → PATH |
 | `skipPatterns` | `*格式要求*` 等 | 通配符匹配文件路径，命中不自动改（防止改到格式规范原件） |
 | `triggerKeywords` | `['公文']` | **触发词**：会话最后一条用户消息必须含其中之一才介入；空数组 = 任何请求都触发 |
-| `skipRequestKeywords` | `['实验报告']` | **排除词**：会话最后一条用户消息含该词就整条请求停用插件 |
 | `maxFilesPerTurn` | `8` | 一轮最多自动处理几个文件 |
 | `prompt.enabled / order` | `true / 3260` | 提示词段开关与排序 |
 | `defaults` | `{}` | 透传给 docxfmt.py，覆盖任何 DEFAULTS（如 `linePt`、`signature.seal`、`skipContentKeywords`） |
@@ -191,8 +189,8 @@ dsh-docx-format/
 
 ## 排查
 
-- 没生效：重启 dsh；再看日志里有没有 `[docx-format] ready python=... whitelist=[...]`。
-- 明明该格式化却没动：看日志有没有 `排除词命中「实验报告」` / `本条请求未提「公文」`；那是白名单在生效，用 `force=true` 绕过。
+- 没生效：重启 dsh；再看启动日志有没有 `[docx-format] ready python=... trigger=["公文"]`。
+- 明明该格式化却没动：看日志有没有 `本条请求未提「公文」 — 不自动格式化`；那是门控在生效，用 `force=true` 绕过。
 - `无法启动 python`：在配置里写死 `python` 路径。
 - 旧文件不自动改：默认 `formatExisting: false`，用 `docx_format` 指定文件，或把它改成 `true`。
 - 只想看问题：`docx_format(mode="check")` 打印逐条 `规则 x次数 where 当前 -> 期望`。

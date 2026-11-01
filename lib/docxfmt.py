@@ -86,8 +86,6 @@ DEFAULTS = {
     # 控制（未明确要求署名/日期时不生成落款文字）。
     "signature": {"enabled": True, "seal": False, "datePadSpaces": 2,
                   "blankLinesBefore": 2},
-    # 正文命中这些关键词时整篇跳过（白名单），如“实验报告”
-    "skipContentKeywords": ["实验报告"],
     "normalize": {
         "stripLeadingSpace": True,
         "fullwidthNumberDot": True,
@@ -1753,7 +1751,7 @@ def doc_text(path):
 
 
 def skip_reason(path, cfg):
-    """白名单：正文命中 skipContentKeywords（默认「实验报告」）时整篇跳过。"""
+    """保留的扩展点：默认不按正文内容跳过任何文档。"""
     kws = cfg.get("skipContentKeywords") or []
     if not kws:
         return None

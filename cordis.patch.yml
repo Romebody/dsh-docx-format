@@ -26,10 +26,6 @@
         # 置成空数组 [] 表示任何请求都触发（旧行为）
         triggerKeywords:
           - '公文'
-        # 排除词：命中即整个插件停用（即使提到了公文）
-        # 例：用户说“写个实验报告” → 不套公文格式、不自动改文件
-        skipRequestKeywords:
-          - '实验报告'
         prompt:
           enabled: true
           order: 3260
