@@ -1,4 +1,45 @@
 {
-  "updatedAt": "2026-11-17T12:21:36.427Z",
-  "items": []
+  "updatedAt": "2026-11-17T13:05:54.836Z",
+  "items": [
+    {
+      "type": "mention",
+      "url": "https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11298",
+      "title": "Update Romebody/dsh-docx-format entry description (plugin v1.1.2)",
+      "state": "closed",
+      "author": "Romebody",
+      "at": "2026-11-02T05:34:16Z",
+      "body": "awesome-dsh-plugin/awesome-dsh-plugin · The plugin shipped **v1.1.2**, which removes the `skipRequestKeywords` mechanism entirely (and the engine-side `skipContentKeywords`). Gating is now a single trigger: the layout applies only when the ",
+      "firstSeen": "2026-W47"
+    },
+    {
+      "type": "mention",
+      "url": "https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/10914",
+      "title": "Add Romebody/dsh-docx-format",
+      "state": "closed",
+      "author": "Romebody",
+      "at": "2026-10-31T12:10:24Z",
+      "body": "awesome-dsh-plugin/awesome-dsh-plugin · Adds `dsh-docx-format`, a Docs & Rendering plugin that normalizes generated Word documents to one Chinese official-document layout. What it does: - Registers a `docx_format` tool (`mode=check|apply`) ",
+      "firstSeen": "2026-W47"
+    },
+    {
+      "type": "mention",
+      "url": "https://github.com/xujian519/dsh-patent/pull/378",
+      "title": "feat(patent): add the patent-filing package",
+      "state": "closed",
+      "author": "xujian519",
+      "at": "2026-10-08T14:34:24Z",
+      "body": "xujian519/dsh-patent · ## Motivation Rendering a patent deliverable stopped at HTML: the DOCX that is actually filed at CNIPA had to be produced by hand, and the conversion — part order, per-section headers, line spacing, f",
+      "firstSeen": "2026-W47"
+    },
+    {
+      "type": "mention",
+      "url": "https://github.com/hackerFish/awesome-dsh-skills/pull/1",
+      "title": "Add verified portable DSH workflow skills",
+      "state": "closed",
+      "author": "lukatong",
+      "at": "2026-08-17T11:38:30Z",
+      "body": "hackerFish/awesome-dsh-skills · ## Summary\\nAdds three original, DSH-native portable skills and their Skills-table entries:\\n\\n- dsh-skill-adapter: ports public portable skills with provenance, tool-mapping, and side-effect controls",
+      "firstSeen": "2026-W47"
+    }
+  ]
 }
