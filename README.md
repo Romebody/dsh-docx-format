@@ -18,12 +18,10 @@ npm 周下载走势（近 1 周）
 
 ## 反馈明细
 
-共 4 条（按时间倒序）：
+共 2 条（按时间倒序）：
 
 | 类型 | 标题 | 作者 | 时间 |
 | --- | --- | --- | --- |
-| mention | [Update Romebody/dsh-docx-format entry description (plugin v1.1.2)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11298) | @Romebody | 2026-11-02 |
-| mention | [Add Romebody/dsh-docx-format](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/10914) | @Romebody | 2026-10-31 |
 | mention | [feat(patent): add the patent-filing package](https://github.com/xujian519/dsh-patent/pull/378) | @xujian519 | 2026-10-08 |
 | mention | [Add verified portable DSH workflow skills](https://github.com/hackerFish/awesome-dsh-skills/pull/1) | @lukatong | 2026-08-17 |
 
