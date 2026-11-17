@@ -126,6 +126,8 @@ async function collectLive(since) {
     const ownRepo = full.toLowerCase() === REPO.toLowerCase()
       || String(m.html_url || '').toLowerCase().includes('/' + REPO.toLowerCase() + '/');
     if (ownRepo) continue;
+    // 自己在别人仓库里开的 PR / issue 也不算“外部反馈”
+    if ((m.user?.login ?? '').toLowerCase() === REPO.split('/')[0].toLowerCase()) continue;
     items.push({
       type: 'mention',
       url: m.html_url,
