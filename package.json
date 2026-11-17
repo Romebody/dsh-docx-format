@@ -1,6 +1,6 @@
 {
   "name": "dsh-docx-format",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "description": "所有生成的 .docx 自动套用《通用公文格式规范》——工具 + 提示词规则 + 结果钩子。",
   "keywords": [
@@ -28,6 +28,7 @@
   "exports": {
     ".": "./index.js",
     "./docxfmt.py": "./lib/docxfmt.py",
+    "./fontcheck.py": "./lib/fontcheck.py",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
@@ -35,6 +36,7 @@
     "index.js",
     "lib/docxfmt.py",
     "lib/docx_read.py",
+    "lib/fontcheck.py",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
