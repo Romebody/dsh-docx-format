@@ -3,26 +3,6 @@
   "items": [
     {
       "type": "mention",
-      "url": "https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/11298",
-      "title": "Update Romebody/dsh-docx-format entry description (plugin v1.1.2)",
-      "state": "closed",
-      "author": "Romebody",
-      "at": "2026-11-02T05:34:16Z",
-      "body": "awesome-dsh-plugin/awesome-dsh-plugin · The plugin shipped **v1.1.2**, which removes the `skipRequestKeywords` mechanism entirely (and the engine-side `skipContentKeywords`). Gating is now a single trigger: the layout applies only when the ",
-      "firstSeen": "2026-W47"
-    },
-    {
-      "type": "mention",
-      "url": "https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/10914",
-      "title": "Add Romebody/dsh-docx-format",
-      "state": "closed",
-      "author": "Romebody",
-      "at": "2026-10-31T12:10:24Z",
-      "body": "awesome-dsh-plugin/awesome-dsh-plugin · Adds `dsh-docx-format`, a Docs & Rendering plugin that normalizes generated Word documents to one Chinese official-document layout. What it does: - Registers a `docx_format` tool (`mode=check|apply`) ",
-      "firstSeen": "2026-W47"
-    },
-    {
-      "type": "mention",
       "url": "https://github.com/xujian519/dsh-patent/pull/378",
       "title": "feat(patent): add the patent-filing package",
       "state": "closed",
