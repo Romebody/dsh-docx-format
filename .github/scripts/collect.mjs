@@ -128,6 +128,10 @@ async function collectLive(since) {
     if (ownRepo) continue;
     // 自己在别人仓库里开的 PR / issue 也不算“外部反馈”
     if ((m.user?.login ?? '').toLowerCase() === REPO.split('/')[0].toLowerCase()) continue;
+    // GitHub 搜索会把包名按连字符拆词（dsh / docx / format），
+    // 光有 “DOCX … format” 也会被搜出来 —— 这里再做一次精确子串校验。
+    const hay = `${m.title || ''}\n${m.body || ''}`.toLowerCase();
+    if (!hay.includes(PKG.toLowerCase())) continue;
     items.push({
       type: 'mention',
       url: m.html_url,
