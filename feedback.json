@@ -1,25 +1,5 @@
 {
   "updatedAt": "2026-11-17T13:12:45.631Z",
-  "items": [
-    {
-      "type": "mention",
-      "url": "https://github.com/xujian519/dsh-patent/pull/378",
-      "title": "feat(patent): add the patent-filing package",
-      "state": "closed",
-      "author": "xujian519",
-      "at": "2026-10-08T14:34:24Z",
-      "body": "xujian519/dsh-patent · ## Motivation Rendering a patent deliverable stopped at HTML: the DOCX that is actually filed at CNIPA had to be produced by hand, and the conversion — part order, per-section headers, line spacing, f",
-      "firstSeen": "2026-W47"
-    },
-    {
-      "type": "mention",
-      "url": "https://github.com/hackerFish/awesome-dsh-skills/pull/1",
-      "title": "Add verified portable DSH workflow skills",
-      "state": "closed",
-      "author": "lukatong",
-      "at": "2026-08-17T11:38:30Z",
-      "body": "hackerFish/awesome-dsh-skills · ## Summary\\nAdds three original, DSH-native portable skills and their Skills-table entries:\\n\\n- dsh-skill-adapter: ports public portable skills with provenance, tool-mapping, and side-effect controls",
-      "firstSeen": "2026-W47"
-    }
-  ]
+  "items": [],
+  "note": "GitHub 搜索会按连字符拆词（dsh/docx/format），命中不等于真的提到本包；采集端已加精确子串校验。"
 }
