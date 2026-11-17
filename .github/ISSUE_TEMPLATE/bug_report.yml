@@ -1,0 +1,78 @@
+name: 问题反馈
+description: 格式化结果不对、报错、装不上、字体缺失
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先跑一次体检会更省事：让模型调用 `docx_format(mode="check")`，把打印出来的 `规则 x次数 where 当前 -> 期望` 贴进来。
+        文档里有本地路径的话，贴之前先删掉。
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 属于哪一类
+      options:
+        - 版式不对（字体/行距/缩进/表格/附件）
+        - 报错或崩溃
+        - 装不上 / 加载不起来
+        - 提示缺字体
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 具体到段落，例如「一级标题没变黑体」「表格只有表头居中」「附件第二行没对齐」
+      placeholder: 我让模型写了一份通知，正文缩进变成了 4 字符……
+    validations:
+      required: true
+  - type: textarea
+    id: expect
+    attributes:
+      label: 你期望的结果
+      placeholder: 按《通用公文格式规范》，正文首行缩进应为 2 字符。
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 有最小复现的 docx 最好，可以直接拖进来（GitHub 支持 .docx 附件）
+      placeholder: |
+        1. 让模型「按公文格式写一份通知」
+        2. 打开生成的 docx
+        3. 看第二段首行缩进
+    validations:
+      required: false
+  - type: input
+    id: pkg
+    attributes:
+      label: 插件版本
+      description: 包管理器里能看到，或看市场页显示
+      placeholder: 1.2.0
+    validations:
+      required: true
+  - type: input
+    id: dsh
+    attributes:
+      label: DSH 版本
+      placeholder: 0.8.x
+    validations:
+      required: false
+  - type: input
+    id: env
+    attributes:
+      label: 系统 / Office
+      placeholder: Windows 11 + Word 2021（或 WPS 12.1）
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 报错原文 / check 输出
+      description: 原样贴，不要改写
+      render: text
+    validations:
+      required: false

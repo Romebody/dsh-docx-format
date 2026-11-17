@@ -11,6 +11,19 @@
 | 钩子 | `tools/result` 观察者 | 任何工具（含 `ops_bash`、技能脚本）产出 .docx 路径后，自动排队规范化 |
 
 真正的排版逻辑在 `lib/docxfmt.py`（python-docx），插件只负责调度进程。
+字体检测/授权/安装单独放在 `lib/fontcheck.py`（纯标准库，不联网检测，下载要用户点头）。
+
+## v1.2.0 新增
+
+- **两档字体**：默认 standard；请求里出现「严格公文格式」或配置 `strictFonts: true` 时切 strict（GBK/GB2312 一套）。
+- **字体自检 + 授权安装**：`mode="fonts"` 报缺哪几个；缺字体**不阻断排版**；
+  用户在当前对话里同意后，`mode="installFonts", confirm=<token>` 才下载安装（令牌一次性、10 分钟）。
+  字体包不进 npm 包，仓库里没有任何 ttf。
+- 请求门控两档：提「公文」→ 完整版式；没提 → 只做全局规范化（分页六项全关、中文引号、中英之间去空格）。
+- 副标题：仿宋三号居中，主副标题之间不空行。
+- 反馈通道：Issue Forms（问题/建议）+ Discussions；出问题时工具报告里带预填 issue 链接与一行诊断。
+  每周自动采集下载量与网上反馈到 [`stats` 分支](https://github.com/Romebody/dsh-docx-format/tree/stats)，
+  原始件 30 天后自动删除；插件运行时零埋点。
 
 ## 本版（v2）修的四件事
 
@@ -42,11 +55,12 @@
    并给出 `附件自动分段不可用` 的提示，折行留给使用者手工换行。
    条目文字短于 `attachSplit.minCharsToMeasure`（默认 20 字）时不可能折行，直接跳过、不启动 Word
    （省 3~6 秒；短附件因此仍是 0.2 秒级的体检）。
-3. **请求门控（只看触发词）+ 默认不写落款**
-   - 触发：看**当前会话最后一条用户消息**，必须命中 `triggerKeywords`（默认 `["公文"]`）才套版式。
-     没提「公文」的请求（写周报、排简历、导出任何 docx）整条停用插件，文件保持原样；
-     `triggerKeywords` 置成空数组表示任何请求都触发（旧行为）。
-   - 停用 = `tools/result` 钩子不排队、队列里的任务出队时再判一次、`docx_format` 直接返回 `skipped`（要强制处理传 `force=true`）。
+3. **请求门控（两档）+ 默认不写落款**
+   - 触发：看**当前会话最后一条用户消息**，命中 `triggerKeywords`（默认 `["公文"]`）→ 套**完整版式**；
+     没提「公文」→ 只做**全局规范化**（`--light`：分页六项全关、中文引号、中英之间去空格），
+     字体/字号/行距/缩进/页边距一律不动。`triggerKeywords` 置空数组表示任何请求都套完整版式。
+   - `globalNormalize: false` 可退回旧行为：没提触发词就彻底不碰文件（`skipped`）。
+   - `docx_format` 传 `force=true` 忽略触发词，直接套完整版式。
      会话文字从 `sessions` 服务的 `session.deriveMessages()` 取，另有 `session/event` 缓存兜底。
    - 落款：提示词明确「用户没要求署名/日期就不写落款」；引擎只格式化**文档里已经存在**的落款，绝不凭空新增。
 4. **表格单元格完全水平居中**
@@ -58,6 +72,10 @@
 - 页面 A4，页边距 上 3.6cm / 下 3.0cm / 左 2.7cm / 右 2.7cm。
 - 正文 仿宋 三号(16pt)，两端对齐，首行缩进 2 字符（`w:firstLineChars="200"`），行距**固定值 29 磅**，段前段后 0。
 - 大标题 方正小标宋简体 二号(22pt)，居中；标题上方空 2 行、下方空 1 行——用**两个 / 一个空段落**表达。
+- 副标题（标题下紧跟的那一行，常以 `——` 开头，如「——在XX会议上的讲话」）：仿宋 三号(16pt)、居中；
+  主标题与副标题之间**不插空行**，标题后的 1 个空行从副标题之后算起（规则名 `title.subtitleGap`）。
+  识别靠 `subtitle` 配置：以 `——` 开头，或主标题 ≤ `mainMaxChars`（默认 18）且该段 ≤ `maxChars`（默认 40）、
+  不以句末标点结尾、不是各级标题/附件/日期。
 - 一级标题 黑体三号、二级标题 楷体三号、三级标题 仿宋三号；编号「一、」「（一）」「1．」（全角点，无尾随空格）。
 - 数字与字母一律 Times New Roman；破折号 `——` 用 TNR；小数点半角。
 - 中英混排：中文内容里的英文单词或缩写（AI、PPT、OA、Word）**前后不加空格**——写「使用AI工具」「OA系统」「Word文档」；
@@ -77,6 +95,15 @@
   折行点由 Word 排版实测（`wdFirstCharacterLineNumber`）后自动拆段，拆完每段在版面里正好一行；
   文件末尾 `附件1` 标记用黑体三号、无缩进、两端对齐、无冒号，其下与附件标题空 1 行。
 - 幂等：重复 `apply` 完全无副作用，`check` 稳定为 0 偏差。
+- **全局规则（与是否提公文无关，`--light` 模式下也执行）**：
+  - 段落「换行和分页」六项一律不启用——孤行控制 / 与下段同页 / 段中不分页 / 段前分页 / 取消行号 / 取消断字，
+    显式写 `w:widowControl="0"`、`w:keepNext="0"`、`w:keepLines="0"`、`w:pageBreakBefore="0"`、
+    `w:suppressLineNumbers="0"`、`w:suppressAutoHyphens="0"`（规则名 `par.pagination.*`；
+    `widowControl` 的 Word 默认是“开”，所以必须写 0，不能靠删元素）。
+  - 中文里的引号用 ``“”‘’``，不用 `「」『』`（规则名 `text.quote`，`normalize.quotePair`）。
+  - 中英混排去空格 + 关 `autoSpaceDE/DN`（见上）。
+  这几条在 `light_pass()` 里对**所有**段落（含表格单元格、文本框）跑一遍，并在保存前再跑一遍——
+  前面插入的空段落、拆出来的附件段也一并覆盖。
 
 ## 用法
 
@@ -87,6 +114,12 @@ python lib/docxfmt.py 报告.docx --mode check          # 只体检，有偏差�
 python lib/docxfmt.py 报告.docx --mode apply          # 规范化并原子写回
 python lib/docxfmt.py ./docs --mode apply --recursive # 批量
 python lib/docxfmt.py 报告.docx --mode check --json   # 机器可读报告
+python lib/docxfmt.py 报告.docx --mode apply --light  # 只做全局规范化（不套公文版式）
+python lib/docxfmt.py 报告.docx --mode apply --font-profile strict  # 严格档字体（GBK/GB2312）
+python lib/docxfmt.py --fonts                        # 只报告字体齐不齐（不碰文档）
+python lib/docxfmt.py --fonts --json                 # 缺字体时返回 consentRequired.token
+python lib/docxfmt.py --install-fonts --confirm <token>        # 用户同意后：按登记的来源下载安装
+python lib/docxfmt.py --install-fonts --preset gongwen        # 只做 dry-run，看会装什么
 # 临时关掉引擎侧内容白名单
 python lib/docxfmt.py 报告.docx --mode apply --config '{"skipContentKeywords":[]}'
 ```
@@ -98,7 +131,47 @@ docx_format(path="C:/.../通知.docx", mode="apply")
 docx_format(path="C:/.../通知.docx", mode="check")
 docx_format(path="C:/.../公文目录", mode="apply", recursive=true)
 docx_format(path="C:/.../通知.docx", mode="apply", force=true)   # 无视请求文字白名单
+docx_format(mode="fonts")                                        # 字体齐不齐
+docx_format(mode="installFonts", confirm="<token>")              # 用户同意后安装
 ```
+
+### 字体：两档 + 缺字体时才问一次
+
+**两档字体**（`fontProfile`）：
+
+| 档位 | 何时用 | 大标题 / 表标题 | 正文 / 三级 | 一级标题 | 二级标题 |
+|---|---|---|---|---|---|
+| `standard`（默认） | 一般场合 | 方正小标宋简体 | 仿宋 | 黑体 | 楷体 |
+| `strict` | 请求里出现「严格公文格式」/「严格公文」，或配置 `strictFonts: true` | 方正小标宋_GBK | 仿宋_GB2312 | 方正黑体_GBK | 楷体_GB2312 |
+
+数字与字母两档都用 Times New Roman。严格档依据 GB/T 9704-2012 的 GBK 系列字形（与 `lib/fontcheck.py` 的 `PRESETS['gongwen-strict']` 一致）。
+
+**缺字体时不会阻断排版**：`apply` 照常改文档，只在 `warnings` 里写一行「系统缺少 X 共 N 个字体（约 M MB），来源：…，是否下载安装？」
+`check` 会多报一条 `font.missing:<字体名>`（退出码 2）。
+
+**下载安装要用户点头**（授权机制）：
+
+1. 模型调 `docx_format(mode="fonts")` → 返回 `consentRequired: {fonts, bytes, mb, source, token, ask, command}`，
+   `token` 是 16 位一次性令牌，内存里存 10 分钟；
+2. 模型把「缺哪几个、多大、从哪下」讲给用户，问一句要不要装；
+3. 用户明确同意后，模型调 `docx_format(mode="installFonts", confirm="<token>")`，
+   引擎校验令牌（用掉即失效）→ `consentRequired.source` 登记的来源下载 → 解包 → 装到用户目录；
+4. 落盘记录写在 `~/.dsh/dsh-docx-format/font-consent.json`，同一批字体以后不再重复问。
+
+没有令牌就是 dry-run：只打印「将安装 …」不落盘。自动格式化路径（`tools/result` 钩子）永远不下载，只记「缺字体…等待授权」。
+
+**安装位置**（都不需要管理员权限）：Windows → `%LOCALAPPDATA%\Microsoft\Windows\Fonts` + HKCU 字体键 + `AddFontResourceW` + 广播 `WM_FONTCHANGE`；
+macOS → `~/Library/Fonts`；Linux → `~/.local/share/fonts` + `fc-cache -f`。装完提示「重启 Word 后生效」
+（以管理员身份运行的 Word 看不到用户级字体，这是 Windows 的既有行为）。
+
+**默认来源**：晋城市财政局公示的常用字体包（一份覆盖两档），
+`http://czj.jcgov.gov.cn/ggfw/xzzx/202506/P020250624600205358001.zip`；
+备选 jsDelivr / raw.githubusercontent 的 `gongwen-fonts` 仓库单文件下载。可用 `fontCheck.sources` 覆盖。
+
+字体包只在运行时下载、**不进 npm 包**：仓库里没有任何 ttf，`npm pack` 出来的还是 10 个源码文件。
+
+**zip 处理**：流式下载到临时目录 → 只认 `.ttf/.otf/.ttc` → 拒绝绝对路径与 `../` 穿越 → 单文件上限 64 MB →
+校验 sfnt magic（`00010000`/`OTTO`/`true`/`ttcf`）与 name 表族名是否对得上。包里混进来的坏文件只跳过、不中断。
 
 ### 读已有 docx：`docx_read`
 
@@ -157,8 +230,13 @@ dsh plugin --profile <profile> add dsh-docx-format
 | `timeoutMs` | `120000` | 单次 python 超时 |
 | `python` | `''` | 显式解释器；空则用 `DSH_DOCX_PYTHON` → `~/.dsh/dsh-runtimes/.../python.exe` → PATH |
 | `skipPatterns` | `*格式要求*` 等 | 通配符匹配文件路径，命中不自动改（防止改到格式规范原件） |
-| `triggerKeywords` | `['公文']` | **触发词**：会话最后一条用户消息必须含其中之一才介入；空数组 = 任何请求都触发 |
+| `triggerKeywords` | `['公文']` | **触发词**：会话最后一条用户消息必须含其中之一才套完整版式；空数组 = 任何请求都套完整版式 |
+| `globalNormalize` | `true` | 没命中触发词时仍做全局规范化（`--light`）；改 `false` 则彻底不碰文件 |
 | `maxFilesPerTurn` | `8` | 一轮最多自动处理几个文件 |
+| `strictFonts` | `false` | `true` = 一律用严格档字体（GBK/GB2312） |
+| `strictKeywords` | `['严格公文格式','严格公文']` | 请求里出现这些词就切严格档 |
+| `fontCheck.enabled` | `true` | 关掉则完全不做字体检测（`--no-font-check`） |
+| `fontCheck.autoInstall` | `ask` | 只认 `ask`（等用户授权）/`off`；不会自己下载 |
 | `prompt.enabled / order` | `true / 3260` | 提示词段开关与排序 |
 | `defaults` | `{}` | 透传给 docxfmt.py，覆盖任何 DEFAULTS（如 `linePt`、`signature.seal`、`skipContentKeywords`） |
 
@@ -174,12 +252,34 @@ dsh plugin --profile <profile> add dsh-docx-format
 | `attachSplit.maxRounds` | `12` | 长条目要拆成多段，最多迭代几轮 |
 | `attachSplit.minCharsToMeasure` | `20` | 短于此长度的条目直接跳过，不启动 Word |
 
+副标题相关键（同样写进 `defaults`）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `subtitle.enabled` | `true` | 关掉就完全不做副标题识别 |
+| `subtitle.mainMaxChars` | `18` | 主标题不超过这么多字时，下一段才可能是副标题（`——` 开头的不受此限） |
+| `subtitle.maxChars` | `40` | 副标题最长字符数 |
+| `subtitle.gapTolerance` | `1` | 主标题与副标题之间最多容忍几个空行（会被删掉） |
+| `normalize.quotePair` | `true` | `「」『』` → `“”‘’` |
+| `normalize.paginationOff` | `true` | 段落「换行和分页」六项全关 |
+
+字体相关键（同样写进 `defaults`）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `fontProfile` | `standard` | `standard` / `strict`，命令行也可 `--font-profile strict` |
+| `fontsStrict` | GBK/2312 一套 | 严格档的字体映射，可整表替换 |
+| `fontCheck.sources` | 晋城 zip | 换成别的下载源（单文件 `{file}` 模板或 zip 直链） |
+| `fontCheck.presets` | `gongwen` / `gongwen-strict` | 覆盖预置清单 |
+| `fontCheck.installDir` | 平台默认 | 强制装到别的目录 |
+
 ## 目录
 
 ```text
 dsh-docx-format/
 ├── index.js            # 插件入口：工具 + 提示词 + 结果钩子 + 请求文字白名单
 ├── lib/docxfmt.py      # 排版引擎（apply/check，命令行可用）
+├── lib/fontcheck.py    # 字体检测/授权/下载/安装（纯标准库）
 ├── cordis.patch.yml    # bundle patch（insert 一行配置）
 ├── locale/zh.json      # 展示文案
 ├── locale/en.json
@@ -203,3 +303,23 @@ dsh-docx-format/
   `apply` 会给段落补 `w:autoSpaceDE="0" w:autoSpaceDN="0"`。
 - 空行看起来“比手工回车矮/宽”：那是空段落没继承前后文字体。用 `docx_format(mode="check")` 看 `blank.mark`，
   它会给出“当前字体/字号/对齐 -> 期望值”，`apply` 会就地重写段落标记的 `w:pPr/w:rPr`。
+- 报缺字体：先 `docx_format(mode="fonts")` 看清单，不要凭印象猜。缺的字体装在**用户目录**时，
+  以管理员身份启动的 Word 看不到（Windows 既有行为），用普通权限打开即可。
+- 严格档没换成 GBK 字体：确认请求里有「严格公文格式」，或配置 `strictFonts: true`；
+  `--fonts --font-profile strict` 会列出严格档要的 6 个字体。
+- 授权令牌报「无效或已过期」：令牌只存内存、10 分钟、用一次即失效；重新跑 `mode="fonts"` 取新的。
+- 字体自测：`python tools/smoke_fonts.py`（两档检测、缺字体不阻断、`font.missing`、假令牌、
+  未授权 dry-run、zip 穿越/伪字体拦截、严格档真的换字体、`--no-font-check`）。
+
+## 反馈与下载统计
+
+- **报问题**：<https://github.com/Romebody/dsh-docx-format/issues/new/choose>（表单，会问版本/系统/复现）。
+  不确定是不是 bug、想贴长文档，去 [Discussions](https://github.com/Romebody/dsh-docx-format/discussions)。
+- 工具跑失败或 `mode="check"` 报了偏差时，报告末尾会自动多两行：一条预填好标题的 issue 链接、
+  一行诊断（版本 / 平台 / 涉及的规则）。只生成链接，不会替你提交任何东西。
+- **下载量周报**：<https://github.com/Romebody/dsh-docx-format/tree/stats>。
+  每周一 08:17（北京）由 `.github/workflows/stats.yml` 自动采集 npm 下载量、仓库 traffic、以及网上提到本包的
+  issue / 评论 / 第三方提及；原始采集件作为 artifact 保留 **30 天**后由 GitHub 自动删除，
+  `stats` 分支只留聚合值（13 周明细 + 月度归档 + 反馈明细，一年约 1.5 MB）。
+- 采集只读公开数据，插件运行时**没有任何埋点**，不向任何服务器上报使用情况。
+

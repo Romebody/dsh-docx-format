@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 讨论 / 使用问题
+    url: https://github.com/Romebody/dsh-docx-format/discussions
+    about: 不确定是不是 bug、想问怎么配、想贴长文档，去 Discussions 更合适
+  - name: 使用说明
+    url: https://github.com/Romebody/dsh-docx-format#readme
+    about: 安装、配置项、字体两档、排查清单
+  - name: 下载与反馈周报
+    url: https://github.com/Romebody/dsh-docx-format/tree/stats
+    about: 每周自动更新的下载量与反馈明细

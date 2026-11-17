@@ -1,6 +1,7 @@
 * text=auto
 
 *.js   text eol=lf
+*.mjs  text eol=lf
 *.py   text eol=lf
 *.sh   text eol=lf
 *.yml  text eol=lf
@@ -9,3 +10,6 @@
 *.svg  text eol=lf
 *.docx binary
 *.png  binary
+*.ttf  binary
+*.otf  binary
+*.tgz  binary

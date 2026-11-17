@@ -21,11 +21,26 @@
           - '*模板*'
           - '~$*'
           - '*/node_modules/*'
-        # 触发词：会话最后一条用户消息必须含其中之一才套公文版式
-        # 例：用户说“按公文格式写份通知” → 生效；只说“写份周报” → 不介入
-        # 置成空数组 [] 表示任何请求都触发（旧行为）
+        # 触发词：会话最后一条用户消息含其中之一 → 套完整公文版式
+        # 例：用户说“按公文格式写份通知” → 生效；只说“写份周报” → 只做全局规范化
+        # 置成空数组 [] 表示任何请求都套完整版式
         triggerKeywords:
           - '公文'
+        # 没命中触发词时仍做全局规范化：分页六项全关、中文引号换“”、中文里英文前后不留空格
+        # 置成 false 则彻底不碰文件（旧行为）
+        globalNormalize: true
+        # 字体档：false = 普通档（方正小标宋简体/仿宋/黑体/楷体）
+        #         true  = 一律严格档（方正小标宋_GBK/仿宋_GB2312/方正黑体_GBK/楷体_GB2312）
+        strictFonts: false
+        # 请求里出现这些词时改用严格档字体（strictFonts: true 时不必写）
+        strictKeywords:
+          - '严格公文格式'
+          - '严格公文'
+        # 字体自检：缺字体只提示、不阻断排版；下载安装必须由用户在当前对话里点头
+        # （mode=fonts 拿到 consentRequired.token → 用户同意 → mode=installFonts, confirm=<token>）
+        fontCheck:
+          enabled: true
+          autoInstall: 'ask'
         prompt:
           enabled: true
           order: 3260

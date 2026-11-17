@@ -1,0 +1,84 @@
+name: stats
+
+# 每周一次采集：npm 下载量、仓库流量、以及「网上的反馈」。
+# 反馈（issue / 评论 / 第三方提及）按 URL 去重后永久累积；
+# 原始采集件只作为 artifact 保留 30 天，过期由 GitHub 自动删除。
+
+on:
+  schedule:
+    - cron: '17 0 * * 1' # 每周一 00:17 UTC = 北京 08:17
+  workflow_dispatch:
+    inputs:
+      since_days:
+        description: '回看多少天的反馈（默认 8）'
+        required: false
+        default: '8'
+
+permissions:
+  contents: write
+  issues: read
+
+concurrency:
+  group: stats
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Collect
+        env:
+          # 优先用 admin PAT（traffic 端点需要 push 权限）；没配就用默认 token
+          GH_TOKEN: ${{ secrets.STATS_PAT || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: node .github/scripts/collect.mjs --out .stats-out
+
+      - name: Upload raw snapshot (auto-deleted after 30 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: stats-raw-${{ github.run_id }}
+          path: .stats-out/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Publish to stats branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          STATS_DIR="$RUNNER_TEMP/stats"
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads origin stats >/dev/null 2>&1; then
+            git clone --depth 1 --branch stats "$REMOTE" "$STATS_DIR"
+          else
+            rm -rf "$STATS_DIR"; mkdir -p "$STATS_DIR"
+            git -C "$STATS_DIR" init -q -b stats
+            git -C "$STATS_DIR" remote add origin "$REMOTE"
+          fi
+
+          node .github/scripts/render.mjs \
+            --row .stats-out/row.json \
+            --feedback .stats-out/feedback.json \
+            --stats-dir "$STATS_DIR"
+
+          cd "$STATS_DIR"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "本周无变化，不提交"
+          else
+            git commit -m "stats: $(date -u +%Y-%m-%d)"
+            git push origin HEAD:stats
+          fi

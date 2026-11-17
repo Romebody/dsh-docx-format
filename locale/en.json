@@ -8,10 +8,12 @@
   "applied": "normalized",
   "clean": "already compliant",
   "violations": "deviations",
-  "skipped": "skipped (no trigger keyword)",
+  "skipped": "skipped (no trigger keyword, global normalization off)",
   "skipReason": "official-document formatting not applied (no trigger keyword)",
+  "lightApplied": "global normalization only (no 公文 in the request: pagination switches, Chinese quotes, no space around Latin words)",
   "config": {
-    "triggerKeywords": "trigger words; the request text must contain one of them, default ['公文']",
+    "triggerKeywords": "trigger words; the request text must contain one of them for the full layout, default ['公文']",
+    "globalNormalize": "still apply global normalization when no trigger word matched (pagination off, Chinese quotes, no CJK-Latin spacing)",
     "autoFormat": "queue any .docx path seen in tool results",
     "formatExisting": "also normalize files created before the plugin loaded"
   }

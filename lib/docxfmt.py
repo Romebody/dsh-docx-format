@@ -73,7 +73,11 @@ DEFAULTS = {
     "spaceAfterPt": 0,
     "marginsCm": {"top": 3.6, "bottom": 3.0, "left": 2.7, "right": 2.7},
     "titleBlankBeforeLines": 2,
+    # 标题后的空行从“副标题”算起：主标题与副标题之间不留空行
     "titleBlankAfterLines": 1,
+    # 副标题：紧跟主标题（中间最多隔一个空段）的另一段短文本，仿宋三号居中
+    "subtitle": {"enabled": True, "mainMaxChars": 18, "maxChars": 40,
+                 "gapTolerance": 1},
     "attachBlankBeforeLines": 1,
     "attachBlankAfterLines": 2,
     # 文件中的“附件1”标记：下与附件标题空出一行（参考要求未规定其上要空行）
@@ -86,6 +90,39 @@ DEFAULTS = {
     # 控制（未明确要求署名/日期时不生成落款文字）。
     "signature": {"enabled": True, "seal": False, "datePadSpaces": 2,
                   "blankLinesBefore": 2},
+    # 字体档：standard 用常见简体字体，strict 用 GBK/GB2312 全字库（更接近
+    # GB/T 9704-2012 的“标准字体”，缺字更少）。
+    #   strictFonts=true      → 一律 strict
+    #   本条请求含 strictKeywords → strict
+    #   都不满足               → standard
+    "fontProfile": "standard",
+    "strictFonts": False,
+    "strictKeywords": ["严格公文格式", "严格公文"],
+    # strict 档在 standard 之上覆盖这些位置
+    "fontsStrict": {
+        "title": "方正小标宋_GBK",
+        "tableCaption": "方正小标宋_GBK",
+        "body": "仿宋_GB2312",
+        "h3": "仿宋_GB2312",
+        "tableBody": "仿宋_GB2312",
+        "h1": "方正黑体_GBK",
+        "tableHead": "方正黑体_GBK",
+        "h2": "楷体_GB2312",
+        "footer": "宋体",
+    },
+    # 字体检测与安装。检测只读注册表/字体目录，**从不联网**；
+    # 下载必须拿到 consent token（或 CLI --yes）。
+    #   autoInstall: ask  缺字体时返回 consentRequired，由对话里问用户
+    #                off  只报告，从不下载
+    "fontCheck": {
+        "enabled": True,
+        "onRun": True,
+        "aliases": {},
+        "presets": {},
+        "sources": [],
+        "autoInstall": "ask",
+        "installDir": "",
+    },
     "normalize": {
         "stripLeadingSpace": True,
         "fullwidthNumberDot": True,
@@ -94,6 +131,11 @@ DEFAULTS = {
         "boldOff": True,
         # 中文内容里英文前后不留空格（「使用AI工具」）；纯英文语句的空格保持原样
         "cjkLatinSpace": True,
+        # 中文里的引号用“”‘’，不用「」『』
+        "quotePair": True,
+        # 「换行和分页」里的 6 个开关（孤行控制/与下段同页/段中不分页/段前分页/
+        # 取消行号/取消断字）一律不启用
+        "paginationOff": True,
     },
 }
 
@@ -104,6 +146,8 @@ RE_ATTACH_TAG = re.compile(r"^[ \u3000]*附件\s*\d{0,2}\s*$")
 RE_ATTACH_LINE = re.compile(r"^[ \u3000]*附件\s*[：:]")
 RE_ATTACH_ITEM = re.compile(r"^[（(]?\d{1,2}\s*[．.、）)]")
 RE_DATE = re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日")
+# 副标题常以破折号开头：「——在XX会议上的讲话」
+RE_DASH_LEAD = re.compile(r"^[—–]{1,2}|^-{1,2}\s")
 RE_LEAD_SPACE = re.compile(r"^[\u3000 ]+")
 RE_FULLWIDTH_SPACE = "\u3000"
 
@@ -502,6 +546,10 @@ def style_par(par, kind, report, label, cfg):
     if kind in ("title", "title_first", "title_mid", "title_last", "title_only"):
         want_align, want_font, want_size = CENTER, fonts["title"], sizes["title"]
         want_first_chars = None
+    elif kind == "subtitle":
+        # 副标题：仿宋三号、居中、无首行缩进，行距仍固定 29 磅
+        want_align, want_font, want_size = CENTER, fonts["body"], sizes["body"]
+        want_first_chars = None
     elif kind == "table_caption":
         want_align, want_font, want_size = CENTER, fonts["tableCaption"], sizes["title"]
         want_first_chars = None
@@ -805,6 +853,80 @@ def drop_char_ranges(runs, gaps):
             run.text = kept
 
 
+# 「换行和分页」里那 6 个开关对应的 OOXML 属性，顺序即 pPr 的 schema 顺序
+PAGINATION_ORDER = ("w:keepNext", "w:keepLines", "w:pageBreakBefore", "w:framePr",
+                    "w:widowControl", "w:numPr", "w:suppressLineNumbers", "w:pBdr",
+                    "w:shd", "w:tabs", "w:suppressAutoHyphens", "w:kinsoku",
+                    "w:wordWrap", "w:overflowPunct", "w:topLinePunct",
+                    "w:autoSpaceDE", "w:autoSpaceDN", "w:bidi", "w:adjustRightInd",
+                    "w:snapToGrid", "w:spacing", "w:ind", "w:contextualSpacing",
+                    "w:mirrorIndents", "w:suppressOverlap", "w:jc",
+                    "w:textDirection", "w:textAlignment", "w:textboxTightWrap",
+                    "w:outlineLvl", "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr",
+                    "w:pPrChange")
+PAGINATION_TAGS = ("w:widowControl", "w:keepNext", "w:keepLines",
+                   "w:pageBreakBefore", "w:suppressLineNumbers",
+                   "w:suppressAutoHyphens")
+PAGINATION_LABELS = {"w:widowControl": "孤行控制", "w:keepNext": "与下段同页",
+                     "w:keepLines": "段中不分页", "w:pageBreakBefore": "段前分页",
+                     "w:suppressLineNumbers": "取消行号",
+                     "w:suppressAutoHyphens": "取消断字"}
+
+# 中文引号：不用「」『』，用“”‘’
+QUOTE_MAP = {"「": "“", "」": "”", "『": "‘", "』": "’"}
+
+
+def _pagination_successors(tag):
+    return PAGINATION_ORDER[PAGINATION_ORDER.index(tag) + 1:]
+
+
+def clear_pagination(par, report, label):
+    """段落「换行和分页」里的 6 个开关一律不启用（对话框里复选框全部留空）。
+
+    这 6 项都不在 python-docx 的 API 里，直接写 pPr：
+    孤行控制 / 与下段同页 / 段中不分页 / 段前分页 / 取消行号 / 取消断字。
+    widowControl 的 Word 默认值是“开”，所以必须显式写 0，不能靠删除元素。
+    """
+    pPr = par._p.get_or_add_pPr()
+    for tag in PAGINATION_TAGS:
+        el = pPr.find(qn(tag))
+        val = None if el is None else (el.get(qn("w:val")) or "1")
+        if el is not None and str(val).lower() in ("0", "false", "off"):
+            continue
+
+        def apply(t=tag, e=el, p=pPr):
+            node = e
+            if node is None:
+                node = OxmlElement(t)
+                try:
+                    p.insert_element_before(node, *_pagination_successors(t))
+                except Exception:
+                    p.append(node)
+            node.set(qn("w:val"), "0")
+
+        report.want("par.pagination." + tag.split(":")[1], label,
+                    "%s：启用" % PAGINATION_LABELS[tag],
+                    "%s：不启用" % PAGINATION_LABELS[tag], apply)
+
+
+def quote_normalize(par, report, label):
+    """中文里的引号写成“”‘’，不写「」『』。"""
+    for idx, run in enumerate(par.runs):
+        t = run.text or ""
+        if not any(ch in QUOTE_MAP for ch in t):
+            continue
+        new = "".join(QUOTE_MAP.get(ch, ch) for ch in t)
+        report.want("text.quote", "%s#r%d" % (label, idx),
+                    "使用「」『』", "使用“”‘’",
+                    (lambda r=run, v=new: setattr(r, "text", v)))
+
+
+def _iter_all_paragraphs(doc):
+    """文档里所有段落（正文 + 表格单元格 + 文本框），每个 XML 节点只回一次。"""
+    for node in doc.element.body.iter(qn("w:p")):
+        yield Paragraph(node, doc)
+
+
 def auto_space_off(par, report, label):
     """关闭 Word 的“自动调整中西文间距”（w:autoSpaceDE / w:autoSpaceDN）。
 
@@ -829,12 +951,32 @@ def auto_space_off(par, report, label):
                     "开启（Word 自动在中英文之间加间距）", "关闭（autoSpaceDE/DN=0）", apply)
 
 
-def normalize_text(par, report, label, cfg):
+def _normalize_cjk_latin(par, report, label, cfg):
+    """中文文段里英文词前后不留空格（「使用AI工具」）；纯英文语句不动。"""
+    if not cfg["normalize"].get("cjkLatinSpace", True):
+        return
+    runs = par.runs
+    if not runs:
+        return
+    joined = "".join(r.text for r in runs)
+    gaps = cjk_latin_gaps(joined)
+    if gaps:
+        report.want("text.cjkLatinSpace", label,
+                    "中文与英文之间夹着空白（共 %d 处）" % len(gaps),
+                    "中文内英文前后不加空格（如「使用AI工具」）",
+                    (lambda rs=runs, gs=gaps: drop_char_ranges(rs, gs)))
+
+
+def normalize_text(par, report, label, cfg, light=False):
     p = par
     text = p.text
     if not text:
         return
     n = cfg["normalize"]
+    if light:
+        # 轻量模式：只做与版式无关的两件事（中英之间不留空格、引号用“”）
+        _normalize_cjk_latin(p, report, label, cfg)
+        return
     if n["stripLeadingSpace"] and RE_LEAD_SPACE.match(text):
         stripped = text.lstrip("\u3000 ")
         if stripped and p.runs:
@@ -863,14 +1005,7 @@ def normalize_text(par, report, label, cfg):
                             (lambda r=run, v=new: setattr(r, "text", v)))
             break
     if n.get("cjkLatinSpace", True):
-        runs = p.runs
-        joined = "".join(r.text for r in runs)
-        gaps = cjk_latin_gaps(joined)
-        if gaps:
-            report.want("text.cjkLatinSpace", label,
-                        "中文与英文之间夹着空白（共 %d 处）" % len(gaps),
-                        "中文内英文前后不加空格（如「使用AI工具」）",
-                        (lambda rs=runs, gs=gaps: drop_char_ranges(rs, gs)))
+        _normalize_cjk_latin(p, report, label, cfg)
 
 
 # ---------------------------------------------------------------- 表格
@@ -1095,27 +1230,47 @@ def _looks_like_attach_wrap(par, cfg):
     return cur is not None and abs(cur - want) < 0.05
 
 
+def _gap_all_blank(items, a, b):
+    """items[a] 与 items[b] 之间（不含两端）是否全是空段落。"""
+    for k in range(a + 1, b):
+        t, obj = items[k]
+        if t != "p" or (obj.text or "").strip():
+            return False
+    return True
+
+
 def classify(items, cfg):
     """返回 [(kind, obj, text)]，kinds: title/table_caption/h1/h2/h3/attach_tag/attach_line/
     sign_org/sign_date/image/body/blank/tbl"""
     out = []
     paras = [(i, obj) for i, (t, obj) in enumerate(items) if t == "p"]
     nonempty = [(i, p) for i, p in paras if p.text.strip()]
-    title_idx = set()
+    title_map = {}
     if nonempty:
         i0 = nonempty[0][0]
-        title_idx.add(i0)
-        # 标题续行：紧跟其后、短、非标题模式、非编号
-        prev_len = len(nonempty[0][1].text.strip())
-        for i, p in nonempty[1:3]:
-            txt = p.text.strip()
-            if (i == i0 + 1 and prev_len <= 18 and len(txt) <= 40
-                    and not txt.endswith(("。", "：", "，", "；", "！", "？", "、", ":"))
-                    and not RE_H1.match(txt) and not RE_H2.match(txt)
-                    and not RE_ATTACH_LINE.match(txt) and not RE_ATTACH_TAG.match(txt)):
-                title_idx.add(i)
-            else:
-                break
+        title_map[i0] = "title"
+        # 副标题：紧跟主标题（中间最多隔 gapTolerance 个空段）的另一段短文本
+        sub = cfg.get("subtitle") or {}
+        if sub.get("enabled", True):
+            tol = max(0, int(sub.get("gapTolerance", 1)))
+            main_max = int(sub.get("mainMaxChars", 18))
+            sub_max = int(sub.get("maxChars", 40))
+            prev_len = len(nonempty[0][1].text.strip())
+            for i, p in nonempty[1:3]:
+                txt = p.text.strip()
+                gap_ok = (i - i0 - 1) <= tol and _gap_all_blank(items, i0, i)
+                # 破折号开头基本就是副标题；否则要求主标题够短，避免把正文首段吃进来
+                dash_lead = bool(RE_DASH_LEAD.match(txt))
+                if (gap_ok and len(txt) <= sub_max
+                        and (dash_lead or prev_len <= main_max)
+                        and not txt.endswith(("。", "：", "，", "；", "！", "？", "、", ":"))
+                        and not RE_H1.match(txt) and not RE_H2.match(txt)
+                        and not RE_ATTACH_LINE.match(txt) and not RE_ATTACH_TAG.match(txt)
+                        and not RE_DATE.search(txt)):
+                    title_map[i] = "subtitle"
+                    prev_len = len(txt)
+                else:
+                    break
 
     # 落款：末尾日期行
     sign = {}
@@ -1136,8 +1291,8 @@ def classify(items, cfg):
             continue
         p = obj
         txt = p.text.strip()
-        if i in title_idx:
-            out.append(("title", p, txt))
+        if i in title_map:
+            out.append((title_map[i], p, txt))
         elif i in sign:
             out.append((sign[i], p, txt))
         elif not txt:
@@ -1203,7 +1358,7 @@ def classify(items, cfg):
                 out[k] = ("caption_spacer", out[k][1], "")
     # 空行也带格式：标题上空、多行标题之间、标题下固定那 1 行 → 沿用标题格式；
     # 其余空行沿用正文格式——和“手工回车”继承出来的结果一致。
-    title_positions = [i for i, (t, _o, _x) in enumerate(out) if t == "title"]
+    title_positions = [i for i, (t, _o, _x) in enumerate(out) if t in ("title", "subtitle")]
     if title_positions:
         first_t, last_t = title_positions[0], title_positions[-1]
         title_side = set(range(0, first_t)) | set(range(first_t + 1, last_t))
@@ -1350,7 +1505,7 @@ def ensure_blank_lines(kinds, report, cfg):
         if old is None or old[1] < want:
             plan[key] = (par, want, label, blank_kind)
 
-    titles = [obj for k, obj, _t in kinds if k == "title"]
+    titles = [obj for k, obj, _t in kinds if k in ("title", "subtitle")]
     if titles:
         bump(titles[0], cfg["titleBlankBeforeLines"], "标题前", "blank_title")
         bump(_next_anchor_par(titles[-1]), cfg["titleBlankAfterLines"], "标题后", "blank_title")
@@ -1627,11 +1782,126 @@ def split_attach_paragraphs(doc, report, cfg):
     return changed
 
 
-def process(path, mode, cfg):
+def _save(doc, path):
+    tmp = path + ".tmp.docx"
+    doc.save(tmp)
+    os.replace(tmp, path)
+
+
+def light_pass(doc, report, cfg):
+    """与版式无关的全局规范化：不论是否套用公文版式都执行。
+
+    - 「换行和分页」里 6 个开关一律不启用
+    - 中文里不写「」『』，改“”‘’
+    - 中文文段里的英文前后不留空格（并关闭 Word 自动中西文间距）
+    """
+    n = cfg["normalize"]
+    pagination = n.get("paginationOff", True)
+    quote = n.get("quotePair", True)
+    for i, par in enumerate(_iter_all_paragraphs(doc)):
+        label = "l%d" % i
+        if pagination:
+            clear_pagination(par, report, label)
+        if quote:
+            quote_normalize(par, report, label)
+        _normalize_cjk_latin(par, report, label, cfg)
+        auto_space_off(par, report, label)
+    return report
+
+
+def drop_blanks_between_titles(items, kinds):
+    """主标题与副标题之间不留空行（空行从副标题之后开始算）。"""
+    idxs = [i for i, (k, _o, _t) in enumerate(kinds) if k in ("title", "subtitle")]
+    if len(idxs) < 2:
+        return 0
+    removed = 0
+    for a, b in zip(idxs, idxs[1:]):
+        for k in range(b - 1, a, -1):
+            if kinds[k][0] in BLANK_KINDS:
+                el = kinds[k][1]._p
+                if el.getparent() is not None:
+                    el.getparent().remove(el)
+                    removed += 1
+    return removed
+
+
+# ---------------------------------------------------------------- 字体档
+def apply_font_profile(cfg, profile=None):
+    """按档位覆盖 cfg["fonts"]，返回实际生效的档位名。
+
+    standard 用常见简体字体；strict 用 GBK/GB2312 全字库。
+    """
+    p = str(profile or cfg.get("fontProfile") or "standard").strip().lower()
+    if p not in ("standard", "strict"):
+        p = "standard"
+    if p == "strict":
+        fonts = cfg.setdefault("fonts", {})
+        for k, v in (cfg.get("fontsStrict") or {}).items():
+            if v:
+                fonts[k] = v
+    return p
+
+
+def check_fonts(report, cfg):
+    """检测缺哪些字体。
+
+    **不联网**：只读注册表与字体目录。check 模式把缺失记成偏差；
+    apply 模式只写 warnings（不影响排版，也不阻断写回）。
+    """
+    fc = cfg.get("fontCheck") or {}
+    if not fc.get("enabled", True):
+        return None
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import fontcheck
+    except Exception:                                      # noqa: BLE001
+        return None
+    try:
+        info = fontcheck.check(cfg)
+    except Exception:                                      # noqa: BLE001
+        return None
+    if not info.get("missing"):
+        return info
+    cr = info.get("consentRequired") or {}
+    ask = cr.get("ask") or ("缺少字体：%s" % "、".join(info["missing"]))
+    if report.mode == "check":
+        for name in info["missing"]:
+            report.want("font.missing:" + name, "字体", "未安装", "已安装")
+    else:
+        report.warnings.append(ask)
+        if cr.get("command"):
+            report.warnings.append("修复：" + cr["command"])
+    report.stats["missingFonts"] = len(info["missing"])
+    return info
+
+
+def process(path, mode, cfg, full=True, profile=None):
     t0 = time.time()
     fix = mode == "apply"
     doc = Document(path)
     report = Report(os.path.abspath(path), mode, fix)
+
+    profile = apply_font_profile(cfg, profile)
+    fontinfo = None
+    if (cfg.get("fontCheck") or {}).get("onRun", True):
+        fontinfo = check_fonts(report, cfg)
+
+    light_pass(doc, report, cfg)
+
+    if not full:
+        changed = report.total > 0
+        if fix and changed:
+            _save(doc, path)
+        out = report.as_dict(changed)
+        out["light"] = True
+        out["writeBack"] = bool(fix and changed)
+        out["elapsedMs"] = int((time.time() - t0) * 1000)
+        out["fontProfile"] = profile
+        if fontinfo:
+            out["fonts"] = fontinfo
+        return out
 
     for section in doc.sections:
         m = cfg["marginsCm"]
@@ -1654,6 +1924,12 @@ def process(path, mode, cfg):
             for _round in range(max(1, int(cfg["attachSplit"]["maxRounds"]))):
                 if not split_attach_paragraphs(doc, report, cfg):
                     break
+            items = _collect_body(doc)
+            kinds = classify(items, cfg)
+        removed = drop_blanks_between_titles(items, kinds)
+        if removed:
+            report.want("title.subtitleGap", "doc.标题",
+                        "%d 个空行" % removed, "0 个空行（主标题与副标题紧邻）")
             items = _collect_body(doc)
             kinds = classify(items, cfg)
         ensure_blank_lines(kinds, report, cfg)
@@ -1695,14 +1971,18 @@ def process(path, mode, cfg):
         # check 模式：只统计表标题与表格之间是否缺空行，内存里插入不写回
         format_table_caption_spacer(items, [k for k, _o, _t in kinds], report, cfg)
 
+    # 前面插过空段、拆过附件段，新段落还没被全局规范化覆盖：收尾再扫一遍
+    light_pass(doc, report, cfg)
+
     changed = report.total > 0
     if fix and changed:
-        tmp = path + ".tmp.docx"
-        doc.save(tmp)
-        os.replace(tmp, path)
+        _save(doc, path)
     out = report.as_dict(changed)
     out["writeBack"] = bool(fix and changed)
     out["elapsedMs"] = int((time.time() - t0) * 1000)
+    out["fontProfile"] = profile
+    if fontinfo:
+        out["fonts"] = fontinfo
     return out
 
 
@@ -1784,13 +2064,145 @@ def _collect(paths, recursive):
     return out
 
 
+def _fonts_cli(args, cfg):
+    """--fonts / --install-fonts 的处理入口。"""
+    import tempfile
+    import shutil
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import fontcheck
+
+    want_install = (args.install_fonts is not None or args.preset
+                    or args.from_zip)
+
+    if args.confirm:
+        # 用户授权令牌：满足它等同于 --yes，且令牌只能用一次
+        rec = fontcheck.consume_consent(args.confirm)
+        if not rec:
+            msg = "授权令牌无效或已过期（请重新运行 --fonts 取新的 token）"
+            if args.json:
+                print(json.dumps({"ok": False, "error": msg,
+                                  "reason": "bad-consent"}, ensure_ascii=False))
+            else:
+                print(msg)
+            return 3
+        args.yes = True
+        if not want_install:
+            # 用户只回传了 token：按当初登记的来源装
+            src = str(rec.get("source") or "")
+            if src.lower().endswith(".zip") or src.startswith(("http://", "https://")):
+                args.from_zip = src
+            elif src in fontcheck.PRESETS:
+                args.preset = src
+
+    if not want_install and not args.yes:
+        info = fontcheck.check(cfg)
+        if args.json:
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+        else:
+            print("平台：%s    安装目录：%s"
+                  % (info["platform"], info["installDir"]))
+            for name in info["required"]:
+                hit = info["found"].get(name)
+                print("  %-4s %s" % ("OK" if hit else "缺失", name))
+            if info["missing"]:
+                cr = info.get("consentRequired") or {}
+                print("")
+                print(info["hint"])
+                if cr:
+                    print(cr["ask"])
+                    print("命令：%s" % cr["command"])
+        return 0 if info["ok"] else 2
+
+    if not args.yes:
+        args.dry_run = True
+        print("需要授权：加 --yes 才会下载安装（当前只做 dry-run）")
+
+    tmpdir = tempfile.mkdtemp(prefix="docxfmt-fonts-")
+    results = []
+    try:
+        if args.from_zip:
+            results += fontcheck.extract_zip(args.from_zip, tmpdir)
+        if args.preset:
+            results += fontcheck.download_preset(args.preset, tmpdir)
+        for src in (args.install_fonts or []):
+            if os.path.isdir(src):
+                for fn in sorted(os.listdir(src)):
+                    if fn.lower().endswith(fontcheck.FONT_EXTS):
+                        results.append({"file": os.path.join(src, fn),
+                                        "ok": True})
+            elif os.path.isfile(src):
+                results.append({"file": src, "ok": True})
+            else:
+                results.append({"file": src, "ok": False,
+                                "reason": "路径不存在"})
+        good = [r["file"] for r in results if r.get("ok")]
+        if not good:
+            print("没有可安装的字体文件")
+            if args.json:
+                print(json.dumps({"results": results}, ensure_ascii=False,
+                                 indent=2))
+            return 1
+        inst = fontcheck.install(good, dry_run=args.dry_run)
+        if args.json:
+            print(json.dumps({"downloaded": results, "installed": inst,
+                              "dryRun": args.dry_run},
+                             ensure_ascii=False, indent=2))
+        else:
+            for it in results:
+                if not it.get("ok"):
+                    print("  [跳过] %s  %s" % (it.get("file"), it.get("reason")))
+            for it in inst:
+                if not it.get("ok"):
+                    print("  [失败] %s  %s" % (it.get("file"), it.get("reason")))
+                    continue
+                verb = {"installed": "已安装", "exists": "已存在",
+                        "copy": "将安装"}.get(it["action"], it["action"])
+                print("  [%s] %s → %s" % (verb, it.get("family"),
+                                          it.get("dest")))
+            if not args.dry_run:
+                fams = [i["family"] for i in inst if i.get("ok")]
+                if fams:
+                    fontcheck.save_consent(
+                        fams,
+                        args.from_zip or args.preset or "local",
+                        [i["dest"] for i in inst if i.get("ok")])
+                    print("\n重启 Word 后生效；以管理员身份运行的 Word "
+                          "看不到用户级字体。")
+        return 0 if all(i.get("ok") for i in inst) else 1
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="docx 公文格式规范化")
-    ap.add_argument("path", nargs="+")
+    ap.add_argument("path", nargs="*")
     ap.add_argument("--mode", choices=["apply", "check"], default="apply")
+    ap.add_argument("--light", action="store_true",
+                    help="只做全局规范化（分页开关/中文引号/中英之间不留空格），不套公文版式")
     ap.add_argument("--recursive", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--config", default=None, help="JSON 配置字符串或 .json 文件路径")
+    ap.add_argument("--fonts", action="store_true",
+                    help="只报告字体安装情况（不处理文档）")
+    ap.add_argument("--install-fonts", nargs="*", default=None,
+                    help="安装字体：本地文件/目录（可留空配合 --preset）")
+    ap.add_argument("--preset", default=None,
+                    help="预置清单：gongwen（普通档）/ gongwen-strict（严格档）")
+    ap.add_argument("--from-zip", default=None,
+                    help="从 zip（URL 或本地路径）提取字体后安装")
+    ap.add_argument("--yes", action="store_true",
+                    help="确认下载安装；缺省时只做 dry-run")
+    ap.add_argument("--confirm", default=None,
+                    help="授权令牌（由 --fonts --json 的 consentRequired.token 给出，"
+                         "用户同意后回传；一次性、10 分钟内有效）")
+    ap.add_argument("--dry-run", action="store_true", help="只报告不落盘")
+    ap.add_argument("--font-profile", choices=["standard", "strict"], default=None,
+                    help="字体档：standard（默认）/ strict（GBK/GB2312）")
+    ap.add_argument("--no-font-check", action="store_true",
+                    help="跳过字体检测")
     args = ap.parse_args(argv)
 
     cfg = DEFAULTS
@@ -1800,6 +2212,21 @@ def main(argv=None):
             with open(raw, "r", encoding="utf-8") as fh:
                 raw = fh.read()
         cfg = merge_config(json.loads(raw))
+
+    if args.font_profile:
+        cfg["fontProfile"] = args.font_profile
+    if args.no_font_check:
+        cfg.setdefault("fontCheck", {})["enabled"] = False
+    if args.config and args.font_profile == "strict":
+        cfg.setdefault("fontCheck", {})
+    apply_font_profile(cfg, cfg.get("fontProfile"))
+
+    if args.fonts or args.install_fonts is not None or args.preset \
+            or args.from_zip:
+        return _fonts_cli(args, cfg)
+
+    if not args.path:
+        ap.error("缺少要处理的 docx 路径（或用 --fonts 查看字体）")
 
     results = []
     failed = False
@@ -1816,7 +2243,7 @@ def main(argv=None):
             })
             continue
         try:
-            res = process(path, args.mode, cfg)
+            res = process(path, args.mode, cfg, full=not args.light)
         except Exception as exc:
             import traceback
             res = {"ok": False, "file": os.path.abspath(path), "mode": args.mode,

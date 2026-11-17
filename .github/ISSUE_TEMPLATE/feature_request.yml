@@ -1,0 +1,37 @@
+name: 功能建议
+description: 版式规则、触发方式、字体档位、安装流程上的建议
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到什么问题
+      description: 描述场景，不用先想解决方案
+      placeholder: 我们单位的表格要求表头斜线表头，现在生成出来是普通表头。
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 你希望怎么改
+      placeholder: 加一个 tableHeaderDiagonal 开关，默认关。
+    validations:
+      required: false
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 影响范围
+      options:
+        - 只影响我这边的特殊情况（可以做成配置项）
+        - 大多数公文都该这样改
+        - 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: ref
+    attributes:
+      label: 依据（规范条款 / 样例）
+      description: 有规范原文或样例文档最能说服人
+    validations:
+      required: false

@@ -13,7 +13,7 @@
  *
  * 真实排版逻辑在 lib/docxfmt.py（python-docx），本文件只做进程调用与调度。
  */
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,6 +26,16 @@ const ENGINE = path.join(HERE, 'lib', 'docxfmt.py')
 const READER = path.join(HERE, 'lib', 'docx_read.py')
 const LOADED_AT = Date.now()
 
+/* 反馈入口：出问题时不硬塞表单，只把预填链接和一行诊断交给用户，点不点由他决定。 */
+const REPO_URL = 'https://github.com/Romebody/dsh-docx-format'
+const PKG_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(path.join(HERE, 'package.json'), 'utf8')).version ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+})()
+
 const DEFAULTS = {
   autoFormat: true,
   formatExisting: false,
@@ -34,8 +44,18 @@ const DEFAULTS = {
   python: '',
   maxFilesPerTurn: 8,
   skipPatterns: ['*格式要求*', '*模板*', '~$*', '*/node_modules/*'],
-  // 触发词：用户请求文字里必须出现其中之一，插件才介入（空数组 = 任何请求都触发）
+  // 触发词：用户请求文字里必须出现其中之一，插件才套公文版式（空数组 = 任何请求都触发）
   triggerKeywords: ['公文'],
+  // 没提触发词时是否仍做全局规范化（分页开关、中文引号、中英之间去空格）
+  globalNormalize: true,
+  // 字体档位：standard = 方正小标宋简体/仿宋/黑体/楷体；
+  // strict = 方正小标宋_GBK/仿宋_GB2312/方正黑体_GBK/楷体_GB2312（GB/T 9704-2012 的 GBK 系列）
+  strictFonts: false,
+  // 请求里出现这些词时改用 strict 档（strictFonts=true 则一律 strict）
+  strictKeywords: ['严格公文格式', '严格公文'],
+  // 字体自检：enabled=false 关掉检测；autoInstall 只认 'ask'（等用户授权）/'off'，
+  // 'auto' 目前不自动执行——下载安装必须由用户在对话里点头。
+  fontCheck: { enabled: true, autoInstall: 'ask' },
   prompt: { enabled: true, order: 3260 },
   tool: { enabled: true },
   defaults: {},
@@ -50,6 +70,11 @@ function normalizeConfig(config) {
     ? value.map(String).map((s) => s.trim()).filter(Boolean)
     : fallback)
   cfg.triggerKeywords = toKeywords(cfg.triggerKeywords, DEFAULTS.triggerKeywords)
+  cfg.strictKeywords = toKeywords(cfg.strictKeywords, DEFAULTS.strictKeywords)
+  cfg.strictFonts = cfg.strictFonts === true
+  cfg.fontCheck = { ...DEFAULTS.fontCheck, ...(config?.fontCheck ?? {}) }
+  cfg.fontCheck.enabled = cfg.fontCheck.enabled !== false
+  cfg.globalNormalize = cfg.globalNormalize !== false
   cfg.prompt = { ...DEFAULTS.prompt, ...(config?.prompt ?? {}) }
   cfg.tool = { ...DEFAULTS.tool, ...(config?.tool ?? {}) }
   cfg.defaults = config?.defaults && typeof config.defaults === 'object' ? config.defaults : {}
@@ -151,8 +176,11 @@ function parseReport(stdout) {
   }
 }
 
-async function formatOne(cfg, python, target, mode, recursive) {
+async function formatOne(cfg, python, target, mode, recursive, light, fontProfile) {
   const args = [target, '--mode', mode, '--json']
+  if (light) args.push('--light')
+  if (fontProfile === 'strict') args.push('--font-profile', 'strict')
+  if (cfg.fontCheck?.enabled === false) args.push('--no-font-check')
   if (recursive) args.push('--recursive')
   if (cfg.defaults && Object.keys(cfg.defaults).length > 0) args.push('--config', JSON.stringify(cfg.defaults))
   const run = await runEngine(python, args, cfg.timeoutMs)
@@ -170,6 +198,9 @@ async function formatOne(cfg, python, target, mode, recursive) {
     ok: files.every((f) => f.ok !== false),
     path: report.path ?? target,
     mode,
+    light: light === true || files.some((f) => f.light === true) ? true : undefined,
+    fontProfile: fontProfile === 'strict' || files.some((f) => f.fontProfile === 'strict') ? 'strict' : undefined,
+    fonts: files.find((f) => f.fonts)?.fonts,
     changed: mode === 'apply' ? fixes : 0,
     violations: mode === 'check' ? fixes : 0,
     fixes,
@@ -326,17 +357,21 @@ export function apply(ctx, config) {
   }
 
   /**
-   * 请求门控：决定这条请求要不要套公文格式。
-   *  - 触发词（triggerKeywords，默认「公文」）非空且未命中 → 停用；
-   *  - 命中触发词（或触发词为空数组）→ 返回 { run: true }。
+   * 请求门控：决定这条请求用哪种力度处理。
+   *  - 触发词（triggerKeywords，默认「公文」）非空且未命中 → 'light'（只做全局规范化）；globalNormalize=false 时 → 'off'；
+   *  - 命中触发词（或触发词为空数组）→ 'full'（连版式一起套）。
+   * 全局规范化 = 分页开关全关、中文引号换“”、中英之间不留空格，与是否提公文无关。
    */
   const requestGate = (sessionId) => {
     const text = requestTextOf(sessionId)
-    if (cfg.triggerKeywords.length > 0) {
-      const trigger = matchKeyword(text, cfg.triggerKeywords)
-      if (!trigger) return { run: false, kind: 'no-trigger', text }
-    }
-    return { run: true, text }
+    // 字体档：strictFonts 全局强制，或本条请求里提到「严格公文格式」
+    const strictHit = matchKeyword(text, cfg.strictKeywords)
+    const profile = cfg.strictFonts || strictHit ? 'strict' : 'standard'
+    if (cfg.triggerKeywords.length === 0) return { mode: 'full', text, profile, strictHit }
+    const trigger = matchKeyword(text, cfg.triggerKeywords)
+    if (trigger) return { mode: 'full', text, trigger, profile, strictHit }
+    if (cfg.globalNormalize) return { mode: 'light', text, profile, strictHit }
+    return { mode: 'off', text, profile, strictHit }
   }
 
   /* ---- 文件排队 ---- */
@@ -388,16 +423,18 @@ export function apply(ctx, config) {
         const job = queue.shift()
         // 出队时再判一次门控：用户可能在这期间改了要求
         const gate = requestGate(job.sessionId)
-        if (!gate.run) {
+        if (gate.mode === 'off') {
           log('info', '[docx-format] skip ' + job.file + ' — '
             + '请求文字未提触发词「' + cfg.triggerKeywords.join('|') + '」')
           continue
         }
         formattedByUs.add(job.file)
-        const report = await formatOne(cfg, python, job.file, 'apply', false)
+        const report = await formatOne(cfg, python, job.file, 'apply', false, gate.mode === 'light', gate.profile)
         handled += 1
         if (report.ok) {
-          log('info', '[docx-format] ' + (report.skipped > 0 ? 'skipped ' : 'formatted ') + report.path
+          log('info', '[docx-format] ' + (report.skipped > 0
+            ? 'skipped '
+            : (report.light ? 'normalized ' : 'formatted ')) + report.path
             + ' (' + report.changed + ' fixes, ' + report.violations + ' violations)')
         } else {
           log('warn', '[docx-format] failed ' + job.file + ': ' + (report.message ?? 'unknown'))
@@ -425,15 +462,70 @@ export function apply(ctx, config) {
       warnings: { type: 'array', items: { type: 'string' } },
       message: { type: 'string' },
       files: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      fontProfile: { type: 'string' },
+      fonts: { type: 'object', additionalProperties: true },
+      consentRequired: { type: 'object', additionalProperties: true },
+      installed: { type: 'array', items: { type: 'object', additionalProperties: true } },
     },
     required: ['ok', 'path', 'mode', 'changed', 'violations'],
     additionalProperties: true,
+  }
+
+  /* 出问题时给一条反馈入口：只生成链接与一行诊断，不自动提交任何东西。 */
+  const issueUrl = (value) => {
+    const head = value?.ok === false
+      ? ('执行失败 · ' + PKG_VERSION)
+      : ('格式偏差 ' + (value?.violations ?? 0) + ' 处 · ' + PKG_VERSION)
+    return REPO_URL + '/issues/new?template=bug_report.yml&title=' + encodeURIComponent('[bug] ' + head)
+  }
+  const diagnostics = (value) => {
+    const rules = {}
+    for (const f of Array.isArray(value?.files) ? value.files : []) {
+      for (const [rule, info] of Object.entries(f?.rules ?? {})) {
+        rules[rule] = (rules[rule] ?? 0) + (Number(info?.count) || 0)
+      }
+    }
+    const top = Object.entries(rules)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([rule, n]) => rule + '×' + n)
+      .join(', ') || '无偏差规则'
+    return 'dsh-docx-format ' + PKG_VERSION + ' · ' + process.platform + ' · node ' + process.version
+      + ' · ' + (value?.mode ?? '?') + ' · ' + (value?.fontProfile ?? 'standard') + ' · ' + top
   }
 
   const renderReport = (value) => {
     const files = Array.isArray(value?.files) ? value.files : []
     const lines = []
     if (value?.message) lines.push(value.message)
+
+    /* ---- 字体 ---- */
+    if (value?.mode === 'fonts' || value?.mode === 'installFonts') {
+      const cr = value?.consentRequired
+      if (value.mode === 'installFonts') {
+        lines.push('[' + (value.ok ? 'OK' : 'FAIL') + '] 字体安装 — ' + (value.message ?? ''))
+        for (const it of value.installed ?? []) {
+          const verb = it.ok ? (it.action === 'exists' ? '已存在' : '已安装') : '失败'
+          lines.push('  - ' + verb + ' ' + (it.family ?? it.file ?? '') + (it.dest ? (' → ' + it.dest) : ''))
+        }
+        return [{ type: 'text', text: lines.join('\n') }]
+      }
+      const info = value.fonts ?? {}
+      const missing = Array.isArray(info.missing) ? info.missing : []
+      if (missing.length === 0) {
+        lines.push('[OK] 字体齐备（profile=' + (value.fontProfile ?? 'standard') + '）')
+      } else {
+        lines.push('[FAIL] 缺 ' + missing.length + ' 个字体（profile=' + (value.fontProfile ?? 'standard') + '）：'
+          + missing.join('、'))
+        if (cr) {
+          lines.push('  来源：' + (cr.source ?? ''))
+          lines.push('  体积：约 ' + (cr.mb ?? '?') + ' MB')
+          lines.push('  要不要现在下载安装？同意的话我传 confirm=' + (cr.token ?? '') + ' 走 mode=installFonts。')
+        }
+        if (info.hint) lines.push('  ' + info.hint)
+      }
+      return [{ type: 'text', text: lines.join('\n') }]
+    }
     if (value?.skipped > 0 && files.length <= 1) {
       lines.push('[SKIP] ' + value.path + ' — 白名单命中，未处理（' + (value.skipReason ?? '') + '）')
       return [{ type: 'text', text: lines.join('\n') }]
@@ -444,7 +536,9 @@ export function apply(ctx, config) {
         : value.mode === 'check'
           ? (value.violations > 0 ? '格式偏差 ' + value.violations + ' 处' : '格式完全符合要求')
           : (value.changed > 0 ? '已修正 ' + value.changed + ' 处' : '无需修改')
-      lines.push('[' + (value.ok ? 'OK' : 'FAIL') + '] ' + value.path + ' — ' + head)
+      lines.push('[' + (value.ok ? 'OK' : 'FAIL') + '] ' + value.path + ' — ' + head
+        + (value.fontProfile === 'strict' ? '（字体档：严格公文格式）' : '')
+        + (value.light === true ? '（本条请求没提「公文」，只做全局规范化：分页开关/中文引号/中英之间不留空格）' : ''))
       const only = files[0]
       if (only?.rules) {
         for (const [rule, info] of Object.entries(only.rules)) {
@@ -453,6 +547,7 @@ export function apply(ctx, config) {
             + (sample ? (': ' + sample.where + ' ' + (sample.current ?? '') + ' -> ' + (sample.expected ?? '')) : ''))
         }
       }
+      for (const w of Array.isArray(value.warnings) ? value.warnings : []) lines.push('  ! ' + w)
     } else {
       lines.push('[' + (value.ok ? 'OK' : 'FAIL') + '] ' + files.length + ' 个文件，修正 '
         + value.changed + ' 处，偏差 ' + value.violations + ' 处'
@@ -461,6 +556,11 @@ export function apply(ctx, config) {
         lines.push('  - ' + (f.skipped ? 'SKIP' : (f.ok ? 'OK' : 'FAIL')) + ' ' + f.path
           + (f.skipped ? ' (' + (f.skipReason ?? '') + ')' : ' (fixes ' + f.violations + ')'))
       }
+    }
+    if (value?.ok === false || (value?.mode === 'check' && value?.violations > 0)) {
+      lines.push('')
+      lines.push('  · 反馈：' + issueUrl(value))
+      lines.push('  · 诊断：' + diagnostics(value))
     }
     return [{ type: 'text', text: lines.join('\n') }]
   }
@@ -472,42 +572,107 @@ export function apply(ctx, config) {
       '固定行距 29 磅、首行缩进 2 字符（w:firstLineChars）、段前段后 0 磅、页边距 3.6/3.0/2.7/2.7cm、',
       '表格单元格水平垂直居中与“— 1 —”页码。',
       'mode=apply 直接改文件（幂等，可重复调用）；mode=check 只报告偏差不改文件。',
-      '仅在用户对话里提到「公文」（triggerKeywords）时插件才介入，未提到时直接返回 skipped；',
-      '确需强制格式化时传 force=true。',
+      '用户请求提到「公文」（triggerKeywords）时套完整版式；没提到时仍会做全局规范化',
+      '（段落分页六项全关、中文引号换“”、中文里英文前后不加空格），并只改这些；',
+      '确需强制套完整版式时传 force=true。',
+      'mode=fonts 只报当前字体是否齐备（缺字体时返回 consentRequired，含一次性 token）；',
+      'mode=installFonts 需要把 token 原样放进 confirm——只有用户明确同意后才调用。',
     ].join(''),
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '要处理的 .docx 文件或目录（绝对路径最稳）。' },
-        mode: { type: 'string', enum: ['apply', 'check'], description: 'apply=规范化并写回；check=只体检。默认 apply。' },
+        path: { type: 'string', description: '要处理的 .docx 文件或目录（绝对路径最稳）。mode=fonts/installFonts 时可省略。' },
+        mode: { type: 'string', enum: ['apply', 'check', 'fonts', 'installFonts'], description: 'apply=规范化并写回；check=只体检；fonts=只报告字体；installFonts=按授权安装字体。默认 apply。' },
         recursive: { type: 'boolean', description: 'path 是目录时是否递归子目录。默认 false。' },
         force: { type: 'boolean', description: '忽略请求触发词强制处理。默认 false。' },
+        confirm: { type: 'string', description: 'mode=installFonts 时必填：mode=fonts 返回的 consentRequired.token，原样传回。' },
+        preset: { type: 'string', description: 'mode=installFonts 可选：gongwen（普通档）/ gongwen-strict（严格档）。' },
+        fromZip: { type: 'string', description: 'mode=installFonts 可选：字体包 zip 的 URL 或本地路径。' },
       },
-      required: ['path'],
+      required: [],
       additionalProperties: false,
     },
     output: { schema: outputSchema, render: (_args, value) => renderReport(value) },
     async execute(args, exec) {
-      const known = new Set(['path', 'mode', 'recursive', 'force'])
+      const known = new Set(['path', 'mode', 'recursive', 'force', 'confirm', 'preset', 'fromZip'])
       for (const key of Object.keys(args ?? {})) {
         if (!known.has(key)) throw new Error('docx_format: 未知参数 ' + key)
       }
+      const requested = typeof args?.mode === 'string' ? args.mode : 'apply'
+      const mode = ['check', 'fonts', 'installFonts'].includes(requested) ? requested : 'apply'
+      const gate = args?.force === true ? undefined : requestGate(exec?.agent?.id)
+      const profile = gate?.profile === 'strict' ? 'strict' : undefined
+
+      /* ---- 字体：只报告 ---- */
+      if (mode === 'fonts') {
+        const argv = ['--fonts', '--json']
+        if (profile === 'strict') argv.push('--font-profile', 'strict')
+        const run = await runEngine(python, argv, cfg.timeoutMs)
+        const info = parseReport(run.stdout)
+        if (!info) {
+          const detail = (run.stderr || run.stdout || '').trim().split('\n').slice(-3).join(' | ')
+          throw new Error('docx_format: 字体检测失败 ' + detail)
+        }
+        const missing = Array.isArray(info.missing) ? info.missing : []
+        log('info', '[docx-format] fonts profile=' + (profile ?? 'standard')
+          + ' missing=' + JSON.stringify(missing))
+        return stripUndefined({
+          ok: missing.length === 0,
+          path: '(字体)',
+          mode,
+          changed: 0,
+          violations: 0,
+          fontProfile: info.profile ?? profile ?? 'standard',
+          fonts: info,
+          consentRequired: info.consentRequired,
+          message: missing.length === 0 ? '字体齐备' : info.hint,
+        })
+      }
+
+      /* ---- 字体：按授权安装 ---- */
+      if (mode === 'installFonts') {
+        const confirm = typeof args?.confirm === 'string' ? args.confirm.trim() : ''
+        if (!confirm) throw new Error('docx_format: mode=installFonts 需要 confirm 令牌（先用 mode=fonts 取 consentRequired.token）')
+        const argv = ['--install-fonts', '--json', '--confirm', confirm]
+        if (typeof args?.preset === 'string' && args.preset.trim()) argv.push('--preset', args.preset.trim())
+        if (typeof args?.fromZip === 'string' && args.fromZip.trim()) argv.push('--from-zip', args.fromZip.trim())
+        const run = await runEngine(python, argv, Math.max(cfg.timeoutMs, 900000))
+        const info = parseReport(run.stdout)
+        if (!info) {
+          const detail = (run.stderr || run.stdout || '').trim().split('\n').slice(-3).join(' | ')
+          throw new Error('docx_format: 字体安装失败 ' + detail)
+        }
+        const installed = Array.isArray(info.installed) ? info.installed : []
+        const okCount = installed.filter((i) => i?.ok).length
+        log('info', '[docx-format] fonts install confirm=ok installed=' + okCount
+          + '/' + installed.length + ' dryRun=' + (info.dryRun === true))
+        return stripUndefined({
+          ok: okCount > 0 && info.error === undefined,
+          path: '(字体)',
+          mode,
+          changed: 0,
+          violations: 0,
+          installed,
+          message: info.error ?? (okCount + ' 个字体已安装，重启 Word 后生效'),
+        })
+      }
+
       const target = typeof args?.path === 'string' ? args.path.trim() : ''
       if (!target) throw new Error('docx_format: 缺少 path')
-      const mode = args?.mode === 'check' ? 'check' : 'apply'
       const recursive = args?.recursive === true
       const file = resolveCandidate(target)
       if (!existsSync(file)) throw new Error('docx_format: 路径不存在 ' + file)
-      if (args?.force !== true) {
-        const gate = requestGate(exec?.agent?.id)
-        if (!gate.run) {
+      let light = false
+      if (gate) {
+        if (gate.mode === 'off') {
           const reason = '请求文字未提到「' + cfg.triggerKeywords.join('|') + '」，本插件停用（确需格式化请传 force=true）'
           log('info', '[docx-format] tool skip ' + file + ' — ' + reason)
           return { ok: true, path: file, mode, changed: 0, violations: 0, fixes: 0,
             changedFiles: 0, skipped: 1, skipReason: reason, warnings: [], files: [] }
         }
+        light = gate.mode === 'light'
       }
-      const report = await formatOne(cfg, python, file, mode, recursive)
+      const report = await formatOne(cfg, python, file, mode, recursive, light, profile)
       if (report.ok && report.changed > 0 && mode === 'apply') formattedByUs.add(file.toLowerCase())
       return report
     },
@@ -639,6 +804,8 @@ export function apply(ctx, config) {
     '',
     '### 字体字号',
     '- 大标题：方正小标宋简体 二号(22pt)，居中。',
+    '- 副标题（标题下紧跟的那一行，常以「——」开头，如「——在XX会议上的讲话」）：仿宋 三号(16pt)，居中；',
+    '  主标题与副标题之间**不插空行**，标题后的空行从副标题之后算起。',
     '- 正文：仿宋 三号(16pt)，两端对齐。一级标题 黑体三号、二级 楷体三号、三级 仿宋三号，',
     '  编号形如「一、」「（一）」「1．」（全角点，序号后不加空格）。',
     '- 数字与字母一律 Times New Roman；破折号「——」用 TNR；时间冒号半角。',
@@ -670,13 +837,27 @@ export function apply(ctx, config) {
     '  引擎（Word/WPS）不可用时退回“首行缩进 2/5 字符、不自动拆段”，折行留给使用者手工换行。',
     '  文件末尾「附件1」黑体三号、无缩进、无冒号，其下与附件标题空一行。',
     '',
+    '### 字体',
+    '- 两档字体：普通档 方正小标宋简体 / 仿宋 / 黑体 / 楷体；严格档（请求里出现「严格公文格式」）',
+    '  方正小标宋_GBK / 仿宋_GB2312 / 方正黑体_GBK / 楷体_GB2312。数字与字母一律 Times New Roman。',
+    '- 不要凭印象说「你缺某字体」：要判断就调 docx_format(mode="fonts")，它返回缺哪几个、约几 MB、从哪下。',
+    '- 缺字体只做一件事：把返回的 consentRequired 讲清楚（缺几个、约几 MB、来源），',
+    '  问用户一句「要不要现在下载安装」；用户明确同意后，才调 docx_format(mode="installFonts", confirm=<token>)。',
+    '- 用户没点头就不要调 installFonts；也不要去别的站点找字体包。安装完提示「重启 Word 后生效」。',
+    '',
     '### 触发',
     '- 只有用户在这条要求里明确提到「公文」（如「按公文格式写一份通知」）时，才套用上面这套版式。',
-    '- 用户没提公文时，不要主动套公文格式，按普通文档/报告排版。',
+    '- 用户没提公文时，不要主动套公文格式，按普通文档/报告排版——但下面的「全局规则」照旧全部适用。',
+    '',
+    '### 全局规则（与是否提公文无关，一律适用）',
+    '- 段落「换行和分页」：孤行控制、与下段同页、段中不分页、段前分页、取消行号、取消断字，**全部不启用**',
+    '  （`w:widowControl="0"`、`w:keepNext="0"`、`w:keepLines="0"`、`w:pageBreakBefore="0"`、',
+    '  `w:suppressLineNumbers="0"`、`w:suppressAutoHyphens="0"`）。',
+    '- 中文里不要用「」『』当引号，一律用“”‘’（「」只出现在讲格式规则的说明文字里）。',
+    '- 中英混排：见下一节。',
     '',
     '### 中英混排（与是否公文无关，一律适用）',
-    '- 中文内容里出现的英文单词或缩写（如 AI、PPT、OA、Word）前后**不加空格**：写「使用AI工具」「OA系统」「Word文档」。',
-    '- 正常的英文句子、英文段落仍按英文习惯加空格：「Please submit the form by Friday.」。',
+    '- 中文内容里出现的英文单词或缩写（如 AI、PPT、OA、Word）前后**不加空格**：写「使用AI工具」「OA系统」「Word文档」。',    '- 正常的英文句子、英文段落仍按英文习惯加空格：「Please submit the form by Friday.」。',
     '- 中英混排的英文用 Times New Roman；中文用仿宋（标题按各自规定）。',
     '- 段落里不要开「自动调整中文与西文/数字的间距」（`w:autoSpaceDE` / `w:autoSpaceDN` 置 0），',
     '  否则即使没有空格字符，渲染出来仍像「使用 AI 工具」。',
@@ -729,7 +910,7 @@ export function apply(ctx, config) {
           if (result?.isError === true) return
           const sessionId = exec?.agent?.id
           const gate = requestGate(sessionId)
-          if (!gate.run) {
+          if (gate.mode === 'off') {
             log('info', '[docx-format] 本条请求未提「公文」 — 不自动格式化')
             return
           }
@@ -743,5 +924,8 @@ export function apply(ctx, config) {
 
   log('info', '[docx-format] ready python=' + python
     + ' autoFormat=' + cfg.autoFormat
-    + ' trigger=' + JSON.stringify(cfg.triggerKeywords))
+    + ' trigger=' + JSON.stringify(cfg.triggerKeywords)
+    + ' strict=' + JSON.stringify(cfg.strictKeywords)
+    + ' strictFonts=' + cfg.strictFonts
+    + ' fontCheck=' + cfg.fontCheck.enabled)
 }
