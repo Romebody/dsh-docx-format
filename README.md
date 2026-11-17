@@ -1,5 +1,9 @@
 # dsh-docx-format
 
+[![npm downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FRomebody%2Fdsh-docx-format%2Fstats%2Fbadge.json)](https://github.com/Romebody/dsh-docx-format/tree/stats)
+[![npm](https://img.shields.io/npm/v/dsh-docx-format)](https://www.npmjs.com/package/dsh-docx-format)
+[![feedback](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FRomebody%2Fdsh-docx-format%2Fstats%2Fbadge-feedback.json)](https://github.com/Romebody/dsh-docx-format/issues)
+
 让 DSH 生成的所有 `.docx` 自动符合《通用公文格式规范》。
 
 三层生效方式，任一层命中就够：
