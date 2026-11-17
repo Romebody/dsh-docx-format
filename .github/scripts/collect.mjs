@@ -121,7 +121,11 @@ async function collectLive(since) {
     });
   }
   for (const m of Array.isArray(mentions?.items) ? mentions.items : []) {
-    if (m.repository_url?.includes(REPO)) continue; // 自己仓库的不算“外部提及”
+    // 自己仓库的不算“外部提及”：三种字段任一命中就跳过（search API 的字段并不总是齐全）
+    const full = m.repository_url?.split('/repos/')[1] ?? m.repository?.full_name ?? '';
+    const ownRepo = full.toLowerCase() === REPO.toLowerCase()
+      || String(m.html_url || '').toLowerCase().includes('/' + REPO.toLowerCase() + '/');
+    if (ownRepo) continue;
     items.push({
       type: 'mention',
       url: m.html_url,
