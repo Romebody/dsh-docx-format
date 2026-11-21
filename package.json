@@ -1,8 +1,8 @@
 {
   "name": "dsh-docx-format",
-  "version": "1.2.1",
+  "version": "1.3.3",
   "type": "module",
-  "description": "所有生成的 .docx 自动套用《通用公文格式规范》——工具 + 提示词规则 + 结果钩子。",
+  "description": "所有生成的 .docx 自动套用《通用公文格式规范》——工具 + 提示词规则 + 结果钩子。默认普通档字体（方正小标宋简体/仿宋/黑体/楷体），不是 GBK/GB2312 那一套；严格档由「严格公文格式」组件行的开关切换，或在会话里说「严格公文格式」（仅当前对话有效）。",
   "keywords": [
     "dsh-plugin",
     "dsh",
@@ -24,6 +24,9 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "dsh-docx-format-strict": "1.0.0"
   },
   "exports": {
     ".": "./index.js",

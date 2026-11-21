@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -29,13 +30,14 @@ try:
     from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
-    from docx.shared import Cm, Pt
+    from docx.shared import Cm, Pt, Twips
     from docx.table import Table
     from docx.text.paragraph import Paragraph
 except Exception as exc:  # pragma: no cover
     print(json.dumps({"ok": False, "error": "python-docx 不可用: %s" % exc}, ensure_ascii=False))
     sys.exit(1)
 
+LEFT = WD_ALIGN_PARAGRAPH.LEFT
 CENTER = WD_ALIGN_PARAGRAPH.CENTER
 RIGHT = WD_ALIGN_PARAGRAPH.RIGHT
 JUSTIFY = WD_ALIGN_PARAGRAPH.JUSTIFY
@@ -53,7 +55,8 @@ DEFAULTS = {
         "tableBody": "仿宋",
         "tableCaption": "方正小标宋简体",
     },
-    "sizes": {"title": 22, "body": 16, "table": 12, "footer": 14, "spacer": 10.5},
+    "sizes": {"title": 22, "body": 16, "table": 12, "footer": 14, "spacer": 10.5,
+              "figCaption": 10.5},
     "linePt": 29,
     # 首行缩进以“字符”为单位（w:firstLineChars），不用磅值
     "indentChars": 2,
@@ -69,8 +72,8 @@ DEFAULTS = {
     "attachSplit": {"enabled": True, "mode": "word", "maxRounds": 12,
                     "minCharsToMeasure": 20},
     # 所有段落段前/段后一律 0 磅；空行用独立空段落（整行）表达
-    "spaceBeforePt": 0,
-    "spaceAfterPt": 0,
+    # 纸张：A4（11906×16838 twips = 21.0×29.7cm）；keep = 保留原文档纸张不动
+    "pageSize": "A4",
     "marginsCm": {"top": 3.6, "bottom": 3.0, "left": 2.7, "right": 2.7},
     "titleBlankBeforeLines": 2,
     # 标题后的空行从“副标题”算起：主标题与副标题之间不留空行
@@ -89,15 +92,12 @@ DEFAULTS = {
     # 默认 True 只格式化文档里【已有】的落款，绝不新增；“默认不写落款”由提示词层
     # 控制（未明确要求署名/日期时不生成落款文字）。
     "signature": {"enabled": True, "seal": False, "datePadSpaces": 2,
-                  "blankLinesBefore": 2},
+                  "orgOverhangSpaces": 2, "blankLinesBefore": 2},
     # 字体档：standard 用常见简体字体，strict 用 GBK/GB2312 全字库（更接近
     # GB/T 9704-2012 的“标准字体”，缺字更少）。
-    #   strictFonts=true      → 一律 strict
-    #   本条请求含 strictKeywords → strict
-    #   都不满足               → standard
+    # 档位由调用方用 --font-profile 指定（插件算好 `组件行启用态 || 本会话命中请求词` 再传进来）；
+    # 直接命令行跑、不传 --font-profile 时一律 standard。
     "fontProfile": "standard",
-    "strictFonts": False,
-    "strictKeywords": ["严格公文格式", "严格公文"],
     # strict 档在 standard 之上覆盖这些位置
     "fontsStrict": {
         "title": "方正小标宋_GBK",
@@ -111,16 +111,12 @@ DEFAULTS = {
         "footer": "宋体",
     },
     # 字体检测与安装。检测只读注册表/字体目录，**从不联网**；
-    # 下载必须拿到 consent token（或 CLI --yes）。
-    #   autoInstall: ask  缺字体时返回 consentRequired，由对话里问用户
-    #                off  只报告，从不下载
+    # 下载必须拿到 consent token（或 CLI --yes）。是否自动下载由插件层
+    # （index.js 的 fontCheck.autoInstall）决定，引擎只负责「报告 + 按令牌安装」。
     "fontCheck": {
         "enabled": True,
         "onRun": True,
-        "aliases": {},
-        "presets": {},
         "sources": [],
-        "autoInstall": "ask",
         "installDir": "",
     },
     "normalize": {
@@ -136,6 +132,16 @@ DEFAULTS = {
         # 「换行和分页」里的 6 个开关（孤行控制/与下段同页/段中不分页/段前分页/
         # 取消行号/取消断字）一律不启用
         "paginationOff": True,
+        # 字符间距「标准」：run 上写 w:spacing w:val="0"
+        "charSpacing": True,
+        # 时间冒号用半角：「15：30」→「15:30」
+        "timeColon": True,
+        # 小数点半角：「3．14」→「3.14」（不碰「1．」这种序号）
+        "numberHalfDot": True,
+        # 文件末尾的「附件1：」去掉冒号
+        "attachTagColon": True,
+        # 落款日期统一成「2026年10月27日」
+        "dateFormat": True,
     },
 }
 
@@ -148,8 +154,36 @@ RE_ATTACH_ITEM = re.compile(r"^[（(]?\d{1,2}\s*[．.、）)]")
 RE_DATE = re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日")
 # 副标题常以破折号开头：「——在XX会议上的讲话」
 RE_DASH_LEAD = re.compile(r"^[—–]{1,2}|^-{1,2}\s")
+# 「表 1 xxx」「图 3 xxx」是表/图标题，不能被判成副标题
+RE_CAPTION_LEAD = re.compile(r"^[表图]\s*[0-9一二三四五六七八九十]+")
+# 图注：以「图 1」开头、自成一段的短句（表标题由“紧邻表格”判定，不走这条）
+RE_FIG_CAPTION = re.compile(r"^[ 　]*图\s*\d{1,3}(?:[.．、\-—]|\s)")
+RE_ADDRESSEE = re.compile(r"^[^。；！？!?]{1,30}[：:]$")
 RE_LEAD_SPACE = re.compile(r"^[\u3000 ]+")
 RE_FULLWIDTH_SPACE = "\u3000"
+# 落款日期的各种写法：2024.10.27 / 2024-10-27 / 2024/10/27 / 2024年10月27日
+RE_DATE_LOOSE = re.compile(r"(\d{4})\s*[.\-/年]\s*(\d{1,2})\s*[.\-/月]\s*(\d{1,2})\s*日?")
+# 时间里的全角冒号：15：30:05
+RE_TIME_COLON = re.compile(r"(\d{1,2})[：:](\d{2})(?=[：:]\d{2}|\s|$|[，。、；）)])")
+# 完整时间（可带秒）：9：30 / 15：30：05 —— 前后的数字或冒号都不算，避免把「302会议室」当成时间
+RE_TIME_FULL = re.compile(r"(?<![\d：:])(\d{1,2})[：:](\d{2})(?:[：:](\d{2}))?(?![\d：:])")
+# 正文里顺手写的点分日期：2024.10.27 / 2024-10-27（整段日期走 RE_DATE_LOOSE）
+RE_DATE_INLINE = re.compile(r"(?<!\d)(\d{4})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})(?!\d)")
+# 小数里的全角点：3．14（后面还得跟数字，才不是「1．」这种序号）
+RE_NUMBER_FULL_DOT = re.compile(r"(?<=\d)．(?=\d)")
+# 文件末尾的附件标记：附件1：/ 附件 2:
+RE_ATTACH_TAG_COLON = re.compile(r"^(附件\s*\d{1,2})\s*[：:]\s*$")
+
+# w:spacing 之后可以出现的元素（按 CT_PPr 的 schema 顺序）
+SPACING_SUCCESSORS = (
+    "w:ind", "w:contextualSpacing", "w:mirrorIndents", "w:suppressOverlap",
+    "w:jc", "w:textDirection", "w:textAlignment", "w:textboxTightWrap",
+    "w:outlineLvl", "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange",
+)
+# 合并重复 w:spacing 时，从前面的节点里挑这几个属性补进来
+SPACING_KEEP_ATTRS = ("w:line", "w:lineRule", "w:before", "w:after",
+                      "w:beforeLines", "w:afterLines")
+
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -174,10 +208,6 @@ def text_width(s):
     for ch in s:
         w += 0.5 if ord(ch) < 0x2000 else 1.0
     return w
-
-
-def is_cjk(ch):
-    return "\u4e00" <= ch <= "\u9fff"
 
 
 def merge_config(user):
@@ -244,6 +274,19 @@ def _s(v):
 
 
 # ---------------------------------------------------------------- 字体/段落
+def _safe_attr(obj, name, default=None):
+    """读 python-docx 的属性，但吞掉“枚举映射不了”的异常。
+
+    真实文档里 `w:highlight w:val="none"` 会让 `f.highlight_color` 抛
+    `ValueError: WD_COLOR_INDEX has no XML mapping for 'none'`，
+    整篇文档直接崩掉。读不到就当它是 default。
+    """
+    try:
+        return getattr(obj, name)
+    except (ValueError, KeyError, AttributeError):
+        return default
+
+
 def set_run(run, font, size, latin, report, where, cfg):
     if run.text is None or run.text == "":
         if run._element.findall(".//" + qn("w:drawing")):
@@ -270,9 +313,16 @@ def set_run(run, font, size, latin, report, where, cfg):
     if cur_sz != size:
         report.want("run.font.size", where, cur_sz, size,
                     lambda: setattr(f, "size", Pt(size)))
-    if f.highlight_color is not None:
-        report.want("run.highlight", where, ename(f.highlight_color), "无",
-                    lambda: setattr(f, "highlight_color", None))
+    hl = rPr.find(qn("w:highlight"))
+    if hl is not None:
+        val = hl.get(qn("w:val"))
+        if val in (None, "none", "auto"):
+            report.want("run.highlight", where, "高亮「%s」" % (val or "无值"), "无",
+                        (lambda r=rPr, h=hl: r.remove(h)))
+        else:
+            report.want("run.highlight", where,
+                        ename(_safe_attr(f, "highlight_color", val)), "无",
+                        (lambda ff=f: setattr(ff, "highlight_color", None)))
 
 
 def style_runs(par, font, size, latin, report, label, cfg):
@@ -304,7 +354,7 @@ AUTOSPACE_SUCCESSORS = ("w:bidi", "w:adjustRightInd", "w:snapToGrid", "w:spacing
                         "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange")
 
 # 空段落有两种：正文侧（沿用仿宋三号正文格式）与标题侧（沿用方正小标宋二号居中）
-BLANK_KINDS = ("blank", "blank_title")
+BLANK_KINDS = ("blank", "blank_title", "blank_add")
 
 
 def _mark_rpr(par, make=False):
@@ -469,15 +519,18 @@ def _style_blank(par, cfg, kind="blank"):
     段落标记（w:pPr/w:rPr）就是 Word 存“空段落字体”的地方，所以字体字号写在那里。
     """
     title_side = kind == "blank_title"
+    add_side = kind == "blank_add"
     pf = par.paragraph_format
+    _sole_spacing(par._p)          # 先把重复的 w:spacing 合并掉，下面 pf.* 写的就是唯一节点
     pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
     pf.line_spacing = Pt(cfg["linePt"])
     _write_zero_spacing(par)
-    pf.alignment = CENTER if title_side else JUSTIFY
+    # 主送机关是顶格的，紧挨着它的空行也要顶格，否则视觉上“空行比正文更缩进”
+    pf.alignment = CENTER if title_side else (LEFT if add_side else JUSTIFY)
     font = cfg["fonts"]["title"] if title_side else cfg["fonts"]["body"]
     size = cfg["sizes"]["title"] if title_side else cfg["sizes"]["body"]
     _write_mark_font(par, font, size, cfg["fonts"]["latin"])
-    chars = 0.0 if title_side else float(cfg["indentChars"])
+    chars = 0.0 if (title_side or add_side) else float(cfg["indentChars"])
     set_chars_indent(par, "firstLine", chars, Pt(chars * float(cfg["sizes"]["body"])))
     set_chars_indent(par, "left", None, Pt(0))
     set_chars_indent(par, "right", None, Pt(0))
@@ -494,10 +547,11 @@ def style_par(par, kind, report, label, cfg):
     if kind in BLANK_KINDS:
         report.stats["para.blank"] += 1
         title_side = kind == "blank_title"
+        add_side = kind == "blank_add"
         b_font = fonts["title"] if title_side else fonts["body"]
         b_size = float(sizes["title"] if title_side else sizes["body"])
-        b_align = CENTER if title_side else JUSTIFY
-        b_chars = 0.0 if title_side else indent_chars
+        b_align = CENTER if title_side else (LEFT if add_side else JUSTIFY)
+        b_chars = 0.0 if (title_side or add_side) else indent_chars
         if pf.line_spacing_rule != WD_LINE_SPACING.EXACTLY or pt_of(pf.line_spacing) != float(cfg["linePt"]):
             report.want("blank.lineSpacing", label, pt_of(pf.line_spacing), float(cfg["linePt"]),
                         (lambda: (setattr(pf, "line_spacing_rule", WD_LINE_SPACING.EXACTLY),
@@ -583,10 +637,24 @@ def style_par(par, kind, report, label, cfg):
             want_align, want_first_chars = RIGHT, None
         else:
             want_align, want_first_chars = None, None
+    elif kind == "attach_title":
+        # 文末「附件1」下面那一行附件标题：同大标题（方正小标宋二号、居中、无首行缩进）
+        want_align, want_font, want_size = CENTER, fonts["title"], sizes["title"]
+        want_first_chars = None
+    elif kind == "addressee":
+        # 主送机关（"各学院、各学生组织："这类称呼）：顶格书写、不缩进
+        want_align, want_font, want_size = LEFT, fonts["body"], sizes["body"]
+        want_first_chars = None
+    elif kind == "fig_caption":
+        # 图注：另起一段、居中、五号仿宋、无首行缩进，行距仍固定 29 磅
+        want_align, want_font = CENTER, fonts["body"]
+        want_size = sizes.get("figCaption", 10.5)
+        want_first_chars = None
     elif kind == "image":
         # 图片所在行：居中、无缩进（首行/左右/悬挂全 0）、单倍行距
         want_align, want_first_chars = CENTER, None
         want_line_single = True
+        image_inline(par, report, label)
     else:
         want_align = JUSTIFY
 
@@ -666,7 +734,8 @@ def style_par(par, kind, report, label, cfg):
     _zero_spacing(par, pf, report, label, cfg)
 
     cur_right = pt_of(pf.right_indent) or 0
-    if abs(cur_right) > 1:
+    # 落款两行用右缩进摆位（署名超出/中心轴对齐），不参与「缩进一律 0」
+    if kind not in ("sign_org", "sign_date") and abs(cur_right) > 1:
         report.want("par.rightIndent", label, cur_right, 0,
                     (lambda: setattr(pf, "right_indent", None)))
 
@@ -677,9 +746,66 @@ def style_par(par, kind, report, label, cfg):
         style_runs(par, want_font, want_size, fonts["latin"], report, label, cfg)
 
 
-def _spacing_elm(par):
+def _spacings(pPr):
+    return [] if pPr is None else pPr.findall(qn("w:spacing"))
+
+
+def _effective_spacing(pPr):
+    """Word 渲染时真正生效的 w:spacing。
+
+    同一个 pPr 下可能有多个 w:spacing（Word 自己不会这么写，但不少生成器会），
+    Word 以**最后一个**为准；python-docx 的 `pPr.spacing` 返回的却是第一个。
+    于是「第一个写对了、最后一个还是旧值」的文档会被误判为合规 —— 表标题与表格
+    之间那一行的行距就是这么丢的。
+    """
+    items = _spacings(pPr)
+    return items[-1] if items else None
+
+
+def _sole_spacing(p_el):
+    """返回唯一的 w:spacing：有重复就先合并成一个（以最后一个为基准）。"""
+    pPr = p_el.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        p_el.insert(0, pPr)
+    items = pPr.findall(qn("w:spacing"))
+    if not items:
+        sp = OxmlElement("w:spacing")
+        pPr.insert_element_before(sp, *SPACING_SUCCESSORS)
+        return sp
+    keep = items[-1]
+    for extra in items[:-1]:
+        for attr in SPACING_KEEP_ATTRS:
+            if keep.get(qn(attr)) is None and extra.get(qn(attr)) is not None:
+                keep.set(qn(attr), extra.get(qn(attr)))
+        pPr.remove(extra)
+    return keep
+
+
+def _spacing_desc(sp):
+    if sp is None:
+        return "无"
+    return "line=%s %s / before=%s / after=%s" % (
+        sp.get(qn("w:line")) or "-", sp.get(qn("w:lineRule")) or "auto",
+        sp.get(qn("w:before")) or "-", sp.get(qn("w:after")) or "-")
+
+
+def dedupe_spacing(par, report, label):
+    """一个 pPr 只留一个 w:spacing；重复的以最后一个（真正生效的那个）为准合并。"""
     pPr = par._p.find(qn("w:pPr"))
-    return None if pPr is None else pPr.find(qn("w:spacing"))
+    items = _spacings(pPr)
+    if len(items) <= 1:
+        return False
+    keep = items[-1]
+    report.want("par.spacingDup", label,
+                "%d 个 w:spacing（生效的是最后一个：%s）" % (len(items), _spacing_desc(keep)),
+                "只保留 1 个 w:spacing",
+                (lambda p=par: _sole_spacing(p._p)))
+    return True
+
+
+def _spacing_elm(par):
+    return _effective_spacing(par._p.find(qn("w:pPr")))
 
 
 def _is_single_line(par):
@@ -691,8 +817,7 @@ def _is_single_line(par):
 
 
 def _write_single_line(par):
-    pPr = par._p.get_or_add_pPr()
-    sp = pPr.get_or_add_spacing()
+    sp = _sole_spacing(par._p)
     sp.set(qn("w:line"), "240")
     sp.set(qn("w:lineRule"), "auto")
 
@@ -729,7 +854,7 @@ def _write_zero_spacing(par):
     “段前段后不是 0 磅”。
     """
     pPr = par._p.get_or_add_pPr()
-    sp = pPr.get_or_add_spacing()
+    sp = _sole_spacing(par._p)
     for key in ("w:beforeLines", "w:afterLines",
                 "w:beforeAutospacing", "w:afterAutospacing"):
         sp.attrib.pop(qn(key), None)
@@ -740,7 +865,7 @@ def _write_zero_spacing(par):
 def _zero_spacing(par, pf, report, label, cfg):
     """段前/段后一律 0 磅：间距由独立空段落表达，不用段前段后。"""
     pPr = par._p.get_or_add_pPr()
-    sp = pPr.find(qn("w:spacing"))
+    sp = _effective_spacing(pPr)
     need = sp is None
     if sp is not None:
         for key in ("w:before", "w:after"):
@@ -785,10 +910,6 @@ def is_cjk_char(ch):
     if ch in CJK_PUNCT:
         return True
     return "\u4e00" <= ch <= "\u9fff" or "\u3400" <= ch <= "\u4dbf"
-
-
-def is_latin_char(ch):
-    return bool(ch) and ch in ASCII_LATIN
 
 
 ALNUM_CHARS = ASCII_LATIN + "0123456789"
@@ -921,10 +1042,112 @@ def quote_normalize(par, report, label):
                     (lambda r=run, v=new: setattr(r, "text", v)))
 
 
+def _has_page_break(par):
+    """段落里是否已有分页符（w:br w:type="page"）。"""
+    for br in par._p.iter(qn("w:br")):
+        if br.get(qn("w:type")) == "page":
+            return True
+    return False
+
+
+def _insert_page_break(par):
+    r = OxmlElement("w:r")
+    # 分页符 run 也要带上字体字号，否则检查器会把它算成「字体不符」
+    src = None
+    for other in par.runs:
+        if other._element.find(qn("w:rPr")) is not None:
+            src = other._element.find(qn("w:rPr"))
+            break
+    if src is not None:
+        r.append(copy.deepcopy(src))
+    br = OxmlElement("w:br")
+    br.set(qn("w:type"), "page")
+    r.append(br)
+    pPr = par._p.find(qn("w:pPr"))
+    if pPr is not None:
+        pPr.addnext(r)
+    else:
+        par._p.insert(0, r)
+
+
+def ensure_page_break(par, report, label):
+    """正文与附件之间、附件与附件之间用分页符断开。
+
+    不用 w:pageBreakBefore —— 那属于「换行和分页」六项，规范要求一律关闭；
+    分页符是正文里的 w:br 节点，与那六项互不影响。
+    """
+    if _has_page_break(par):
+        return
+    report.want("par.pageBreak", label, "本段之前没有分页符", "正文/附件之间分页",
+                lambda: _insert_page_break(par))
+
+
 def _iter_all_paragraphs(doc):
-    """文档里所有段落（正文 + 表格单元格 + 文本框），每个 XML 节点只回一次。"""
-    for node in doc.element.body.iter(qn("w:p")):
-        yield Paragraph(node, doc)
+    """文档里所有段落（正文 + 表格单元格 + 文本框 + 页眉页脚），每个 XML 节点只回一次。"""
+    roots = [doc.element.body]
+    for section in doc.sections:
+        for part in (section.header, section.footer,
+                     section.first_page_header, section.first_page_footer,
+                     section.even_page_header, section.even_page_footer):
+            try:
+                if part is not None and not part.is_linked_to_previous:
+                    roots.append(part._element)
+            except Exception:
+                continue
+    for root in roots:
+        for node in root.iter(qn("w:p")):
+            yield Paragraph(node, doc)
+
+
+SNAP_SUCCESSORS = (
+    "w:spacing", "w:ind", "w:contextualSpacing", "w:mirrorIndents",
+    "w:suppressOverlap", "w:jc", "w:textDirection", "w:textAlignment",
+    "w:textboxTightWrap", "w:outlineLvl", "w:divId", "w:cnfStyle", "w:rPr",
+    "w:sectPr", "w:pPrChange",
+)
+
+
+def snap_to_grid_off(par, report, label):
+    """不挂在文档网格上（「行与行字对齐」关掉），否则字距会被网格拉散。"""
+    pPr = par._p.find(qn("w:pPr"))
+    el = None if pPr is None else pPr.find(qn("w:snapToGrid"))
+    if el is not None and (el.get(qn("w:val")) or "1") in ("0", "false", "off"):
+        return
+
+    def apply():
+        p = par._p.get_or_add_pPr()
+        node = p.find(qn("w:snapToGrid"))
+        if node is None:
+            node = OxmlElement("w:snapToGrid")
+            p.insert_element_before(node, *SNAP_SUCCESSORS)
+        node.set(qn("w:val"), "0")
+
+    report.want("par.snapToGrid", label, "跟随文档网格", "不挂网格（snapToGrid=0）", apply)
+
+
+def image_inline(par, report, label):
+    """浮动图片（wp:anchor）改成嵌入型（wp:inline），否则整段居中不生效、图会跑版。"""
+    WPD = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    move = []
+    for dr in par._p.iter(qn("w:drawing")):
+        anchor = dr.find("{%s}anchor" % WPD)
+        if anchor is not None:
+            move.append(anchor)
+    if not move:
+        return
+
+    def apply():
+        for a in move:
+            inline = OxmlElement("wp:inline")
+            for k in ("distT", "distB", "distL", "distR"):
+                inline.set(k, "0")
+            for el in list(a):
+                if el.tag in (qn("wp:extent"), qn("wp:effectExtent"), qn("wp:docPr"),
+                              qn("wp:cNvGraphicFramePr"), qn("a:graphic")):
+                    inline.append(el)          # 直接搬节点，anchor 随后被替换
+            a.getparent().replace(a, inline)
+
+    report.want("image.inline", label, "浮动（wp:anchor）", "嵌入型（wp:inline）", apply)
 
 
 def auto_space_off(par, report, label):
@@ -967,6 +1190,102 @@ def _normalize_cjk_latin(par, report, label, cfg):
                     (lambda rs=runs, gs=gaps: drop_char_ranges(rs, gs)))
 
 
+RPR_SPACING_SUCCESSORS = (
+    "w:w", "w:kern", "w:position", "w:sz", "w:szCs", "w:highlight", "w:u",
+    "w:effect", "w:bdr", "w:shd", "w:fitText", "w:vertAlign", "w:rtl", "w:cs",
+    "w:em", "w:lang", "w:eastAsianLayout", "w:specVanish", "w:oMath",
+)
+
+
+def _write_run_char_spacing(run, val):
+    rPr = run._r.get_or_add_rPr()
+    sp = rPr.find(qn("w:spacing"))
+    if sp is None:
+        sp = OxmlElement("w:spacing")
+        rPr.insert_element_before(sp, *RPR_SPACING_SUCCESSORS)
+    sp.set(qn("w:val"), val)
+
+
+def char_spacing_std(par, report, label):
+    """字符间距「标准」：run 上 w:spacing w:val="0"（Word 默认是 0，但被改过的要拉回）。"""
+    for run in par.runs:
+        rPr = run._r.find(qn("w:rPr"))
+        sp = None if rPr is None else rPr.find(qn("w:spacing"))
+        if sp is None:
+            continue                      # 没写就是标准值 0，不必到处塞节点
+        if (sp.get(qn("w:val")) or "0") == "0":
+            continue
+        report.want("run.charSpacing", label, "非标准（%s）" % sp.get(qn("w:val")),
+                    "标准（w:spacing=0）",
+                    (lambda r=run: _write_run_char_spacing(r, "0")))
+
+
+def _replace_par_text(par, text):
+    """整段换文字：写在第一个 run 上，其余清空（保留第一个 run 的格式）。"""
+    runs = par.runs
+    if not runs:
+        return
+    runs[0].text = text
+    for r in runs[1:]:
+        r.text = ""
+
+
+def _text_rules(par, report, label, cfg):
+    """与版式无关的四条文本规则：时间冒号、小数点半角、附件标记冒号、日期格式。"""
+    n = cfg["normalize"]
+    runs = par.runs
+    if not runs:
+        return
+    if n.get("timeColon", True):
+        for run in runs:
+            new = RE_TIME_FULL.sub(
+                lambda m: "%s:%s%s" % (m.group(1), m.group(2),
+                                       (":" + m.group(3)) if m.group(3) else ""),
+                run.text)
+            if new != run.text:
+                report.want("text.timeColon", label, "时间用了全角冒号", "时分之间用半角冒号",
+                            (lambda r=run, v=new: setattr(r, "text", v)))
+    if n.get("numberHalfDot", True):
+        for run in runs:
+            txt = run.text
+            # 附件序号的点必须保持全角：附件：1．2026年度… / 2．2026年度…
+            # 这里的「．」后面正好跟四位年份，会被当成小数点误改成半角。
+            prefix = ""
+            m = re.match(r"^(附件\s*[：:]\s*\d{1,2})．", txt) or \
+                re.match(r"^(\d{1,2})．(?=\d{4})", txt)
+            if m:
+                prefix, txt = m.group(1) + "．", txt[m.end():]
+            new = RE_NUMBER_FULL_DOT.sub(".", txt)
+            if new != txt:
+                report.want("text.numberHalfDot", label, "小数点是全角．", "小数点用半角.",
+                            (lambda r=run, v=prefix + new: setattr(r, "text", v)))
+    if n.get("dateFormat", True):
+        # 只规范化“整段就是一个日期”的段落（落款、日期行），正文里顺手写的时间不动
+        whole = par.text.strip()
+        m = RE_DATE_LOOSE.fullmatch(whole) if whole else None
+        if m and runs:
+            new = "%s年%d月%d日" % (m.group(1), int(m.group(2)), int(m.group(3)))
+            if new != whole:
+                report.want("text.dateFormat", label, whole, new,
+                            (lambda: _replace_par_text(par, new)))
+        elif runs:
+            # 正文里顺手写的点分日期：2024.10.27 → 2024年10月27日（四位年打头，不会误伤 3.5 这类小数）
+            for run in runs:
+                new = RE_DATE_INLINE.sub(
+                    lambda x: "%s年%d月%d日" % (x.group(1), int(x.group(2)), int(x.group(3))),
+                    run.text)
+                if new != run.text:
+                    report.want("text.dateFormat", label, "日期用了点/斜杠分隔", "2024年10月27日",
+                                (lambda r=run, v=new: setattr(r, "text", v)))
+    if n.get("attachTagColon", True):
+        if RE_ATTACH_TAG_COLON.match(par.text.strip()) and runs:
+            last = runs[-1]
+            new = re.sub(r"\s*[：:]\s*$", "", last.text)
+            if new != last.text:
+                report.want("text.attachTagColon", label, "附件标记后面带冒号", "去掉冒号",
+                            (lambda r=last, v=new: setattr(r, "text", v)))
+
+
 def normalize_text(par, report, label, cfg, light=False):
     p = par
     text = p.text
@@ -974,9 +1293,11 @@ def normalize_text(par, report, label, cfg, light=False):
         return
     n = cfg["normalize"]
     if light:
-        # 轻量模式：只做与版式无关的两件事（中英之间不留空格、引号用“”）
+        # 轻量模式：只做与版式无关的几件事（引号、时间/小数/日期写法、中英之间不留空格）
+        _text_rules(p, report, label, cfg)
         _normalize_cjk_latin(p, report, label, cfg)
         return
+    _text_rules(p, report, label, cfg)
     if n["stripLeadingSpace"] and RE_LEAD_SPACE.match(text):
         stripped = text.lstrip("\u3000 ")
         if stripped and p.runs:
@@ -994,16 +1315,20 @@ def normalize_text(par, report, label, cfg, light=False):
                         report.want("text.numberDot", label, "半角序号点", "全角．",
                                     (lambda r=run, v=new: setattr(r, "text", v)))
                     break
-        # 「附件：1. xxx」里的序号点也要全角，且不留空格
-        for run in p.runs:
-            if "附件" not in run.text:
-                continue
-            new = re.sub(r"(附件：\s*)(\d{1,2})\s*\.(?!\d)\s*", "\\1\\2．", run.text)
-            new = re.sub(r"(附件：\s*)(\d{1,2})\s*．\s+", "\\1\\2．", new)
-            if new != run.text:
-                report.want("text.attachNumberDot", label, "附件序号半角点/空格", "全角．",
-                            (lambda r=run, v=new: setattr(r, "text", v)))
-            break
+        # 「2．2026年度…」这类附件条目：点后紧跟四位年份，是序号不是小数，点也全角
+        s2 = p.text.strip()
+        if re.match(r"^\d{1,2}\s*\.\s*(?=\d{4})", s2):
+            new2 = re.sub(r"^(\d{1,2})\s*\.\s*(?=\d{4})", "\\1．", s2)
+            if new2 != p.text:
+                report.want("text.numberDot", label, s2[:10], new2[:10],
+                            (lambda: _replace_par_text(p, new2)))
+        # 「附件：1. xxx」里的序号点也要全角，且不留空格（序号常被拆在别的 run 里，按整段处理）
+        s = p.text.strip()
+        if re.match(r"^附件\s*[：:]\s*\d{1,2}\s*[.．、]", s):
+            new = re.sub(r"^(附件\s*[：:]\s*)(\d{1,2})\s*[.．、]\s*", "\\1\\2．", s)
+            if new != p.text:
+                report.want("text.attachNumberDot", label, s[:12], new[:12],
+                            (lambda: _replace_par_text(p, new)))
     if n.get("cjkLatinSpace", True):
         _normalize_cjk_latin(p, report, label, cfg)
 
@@ -1028,8 +1353,6 @@ def set_borders(tbl, report, label, cfg):
         sz = None if cur is None else cur.get(qn("w:sz"))
         if val in (None, "nil", "none") or sz != want_sz[edge]:
             diffs.append((edge, "%s/%s" % (val, sz), "single/%s" % want_sz[edge]))
-    if not diffs:
-        return
     def rebuild():
         old = tblPr.find(qn("w:tblBorders"))
         if old is not None:
@@ -1047,14 +1370,143 @@ def set_borders(tbl, report, label, cfg):
     for edge, cur_s, want_s in diffs:
         report.want("table.border." + edge, label, cur_s, want_s, rebuild)
 
+    # 单元格级 tcBorders 会盖住 tblBorders（表头下边、首列右边就变成 1.5 磅）
+    if _count_cell_borders(tbl):
+        report.want("table.cellBorders", label,
+                    "单元格自带边框（覆盖表的边框粗细）", "删掉，只留 tblBorders",
+                    (lambda: _strip_cell_borders(tbl)))
+    cs = tblPr.find(qn("w:tblCellSpacing"))
+    if cs is not None:
+        report.want("table.cellSpacing", label, cs.get(qn("w:w")), "无",
+                    (lambda e=cs: tblPr.remove(e)))
 
-def style_table(tbl, report, label, cfg):
+
+def _count_cell_borders(tbl):
+    n = 0
+    for row in tbl.rows:
+        for cell in row.cells:
+            tcPr = cell._tc.tcPr
+            if tcPr is None or _cell_spans(tcPr):
+                continue
+            if tcPr.find(qn("w:tcBorders")) is not None:
+                n += 1
+    return n
+
+
+def _strip_cell_borders(tbl):
+    n = 0
+    for row in tbl.rows:
+        for cell in row.cells:
+            tcPr = cell._tc.tcPr
+            if tcPr is None or _cell_spans(tcPr):
+                continue
+            el = tcPr.find(qn("w:tcBorders"))
+            if el is not None:
+                tcPr.remove(el)
+                n += 1
+    return n
+
+
+def _cell_spans(tcPr):
+    return (tcPr.find(qn("w:gridSpan")) is not None
+            or tcPr.find(qn("w:vMerge")) is not None)
+
+
+def clear_floating(tbl, report, label):
+    """表格不浮动、不叠放：删 tblpPr / tblOverlap。"""
+    tblPr = tbl._element.tblPr
+    for tag in ("w:tblpPr", "w:tblOverlap"):
+        el = tblPr.find(qn(tag))
+        if el is not None:
+            report.want("table.floating", label, "浮动/叠放", "无文字环绕",
+                        (lambda p=tblPr, e=el: p.remove(e)))
+
+
+def layout_table_width(tbl, report, label, cfg, usable_cm=None):
+    """固定列宽、整表宽度 = 版心 − 两侧各 0.19cm，按内容权重分配，单列下限 1.2cm。"""
+    if usable_cm is None:
+        usable_cm = 21.0 - cfg["marginsCm"]["left"] - cfg["marginsCm"]["right"]
+    want_cm = max(3.0, usable_cm - 2 * 0.19)
+    tblPr = tbl._element.tblPr
+
+    lay = tblPr.find(qn("w:tblLayout"))
+    if lay is None or lay.get(qn("w:type")) != "fixed":
+        report.want("table.layout", label,
+                    None if lay is None else lay.get(qn("w:type")), "fixed",
+                    (lambda: _set_or_make(tblPr, "w:tblLayout", {"w:type": "fixed"})))
+
+    want_tw = str(int(round(Cm(want_cm).twips)))
+    w = tblPr.find(qn("w:tblW"))
+    if w is None or w.get(qn("w:type")) != "dxa" or (w.get(qn("w:w")) or "") != want_tw:
+        report.want("table.width", label,
+                    "auto" if w is None else "%s/%s" % (w.get(qn("w:type")), w.get(qn("w:w"))),
+                    "dxa/%s（%.2fcm）" % (want_tw, want_cm),
+                    (lambda: _set_or_make(tblPr, "w:tblW", {"w:type": "dxa", "w:w": want_tw})))
+
+    mar = tblPr.find(qn("w:tblCellMar"))
+    if mar is not None:
+        report.want("table.cellMar", label, "单元格内边距偏大", "左右 0.19cm",
+                    (lambda e=mar: tblPr.remove(e)))
+
+    # 列宽：按每列最长文本加权
+    ncol = 0
+    for row in tbl.rows:
+        ncol = max(ncol, len(row.cells))
+    if not ncol:
+        return
+    def _vis(txt):
+        # 视觉宽度：汉字算 1，数字/字母/半角符号算 0.55（TNR 半角窄），
+        # 先把两字词补的空格去掉，否则列宽会来回震荡。
+        # 注意：落款算空格数用的是另一个 text_width()（按 ord < 0x2000 折算 0.5，
+        # 语义是「半角/全角」而不是「数字更窄」）。两者阈值不同，别合并。
+        s = txt.replace(" ", "").replace("\u3000", "").strip()
+        return sum(1.0 if ord(ch) > 0x2E7F else 0.55 for ch in s)
+
+    weights = []
+    for c in range(ncol):
+        widest = 1.0
+        for row in tbl.rows:
+            cells = row.cells
+            if c < len(cells):
+                widest = max(widest, _vis(cells[c].text))
+        weights.append(min(widest, 14.0))
+    total = float(sum(weights))
+    floor_cm = 2.0
+    widths = [max(floor_cm, want_cm * wt / total) for wt in weights]
+    scale = want_cm / sum(widths)
+    widths = [x * scale for x in widths]
+
+    # 一律按整数 twips 落地：各自取整后把余数补到最后一列，
+    # 保证「列宽合计正好等于整表宽」，不会因为各自四舍五入差 0.01cm 而永远报一条偏差。
+    twips = [int(round(Cm(x).twips)) for x in widths]
+    twips[-1] += int(round(Cm(want_cm).twips)) - sum(twips)
+
+    cols = tbl.columns
+    cur = [None if cols[i].width is None else int(round(cols[i].width.twips))
+           for i in range(min(ncol, len(cols)))]
+    # 回读时 Twips→EMU→twips 会差几个 twip（约 0.02cm），按容差判定，避免永远报一条偏差
+    def _near(a, b):
+        return a is not None and abs(a - b) <= 20
+
+    if not (len(cur) == len(twips) and all(_near(a, b) for a, b in zip(cur, twips))):
+        def apply_widths():
+            for i, tw in enumerate(twips):
+                tbl.columns[i].width = Twips(tw)
+                for row in tbl.rows:
+                    if i < len(row.cells):
+                        row.cells[i].width = Twips(tw)
+        report.want("table.columnWidths", label, str(cur), str(twips), apply_widths)
+
+
+def style_table(tbl, report, label, cfg, usable_cm=None):
     report.stats["tables"] += 1
     tblPr = tbl._element.tblPr
     jc = tblPr.find(qn("w:jc"))
     if jc is None or jc.get(qn("w:val")) != "center":
         report.want("table.alignment", label, None if jc is None else jc.get(qn("w:val")), "center",
                     lambda: (_set_or_make(tblPr, "w:jc", {"w:val": "center"})))
+    clear_floating(tbl, report, label)
+    layout_table_width(tbl, report, label, cfg, usable_cm)
     set_borders(tbl, report, label, cfg)
 
     # 表格本体缩进清零，避免 tblInd 把整表推偏导致“看起来没居中”
@@ -1266,24 +1718,36 @@ def classify(items, cfg):
                         and not txt.endswith(("。", "：", "，", "；", "！", "？", "、", ":"))
                         and not RE_H1.match(txt) and not RE_H2.match(txt)
                         and not RE_ATTACH_LINE.match(txt) and not RE_ATTACH_TAG.match(txt)
+                        and not RE_CAPTION_LEAD.match(txt)      # 「表 1 xxx」是表标题，不是副标题
                         and not RE_DATE.search(txt)):
                     title_map[i] = "subtitle"
                     prev_len = len(txt)
                 else:
                     break
 
-    # 落款：末尾日期行
+    # 落款：整段就是一个日期，且它后面紧跟「附件N」标记或文档结束。
+    # 不能只看“末尾 6 段”——带附件正文的公文，落款在文档中间。
     sign = {}
-    tail = [(i, p) for i, p in paras if p.text.strip()][-6:]
-    for pos, (i, p) in enumerate(tail):
-        if RE_DATE.search(p.text) and text_width(p.text.strip()) <= 26:
-            sign[i] = "sign_date"
-            if pos > 0:
-                prev_i, prev_p = tail[pos - 1]
-                if (text_width(prev_p.text.strip()) <= 24 and not RE_DATE.search(prev_p.text)
-                        and not prev_p.text.strip().endswith(("。", "．", "，", "；"))):
-                    sign[prev_i] = "sign_org"
-            break
+    ne = [(i, p) for i, p in paras if p.text.strip()]
+    cands = []
+    for pos, (i, p) in enumerate(ne):
+        txt = p.text.strip()
+        if not (RE_DATE.fullmatch(txt) or RE_DATE_LOOSE.fullmatch(txt)):
+            continue
+        if text_width(txt) > 26:
+            continue
+        nxt = ne[pos + 1][1].text.strip() if pos + 1 < len(ne) else ""
+        if nxt and not RE_ATTACH_TAG.match(nxt):
+            continue        # 后面还有正文 → 不是落款日期
+        cands.append((pos, i, p))
+    if cands:
+        pos, i, p = cands[-1]
+        sign[i] = "sign_date"
+        if pos > 0:
+            prev_i, prev_p = ne[pos - 1]
+            if (text_width(prev_p.text.strip()) <= 24 and not RE_DATE.search(prev_p.text)
+                    and not prev_p.text.strip().endswith(("。", "．", "，", "；"))):
+                sign[prev_i] = "sign_org"
 
     for i, (t, obj) in enumerate(items):
         if t == "tbl":
@@ -1308,10 +1772,25 @@ def classify(items, cfg):
             out.append(("h2", p, txt))
         elif RE_H3.match(p.text):
             out.append(("h3", p, txt))
+        elif RE_FIG_CAPTION.match(p.text or txt):
+            out.append(("fig_caption", p, txt))
         elif p._element.findall(".//" + qn("w:drawing")):
             out.append(("image", p, txt))
         else:
             out.append(("body", p, txt))
+    # 主送机关：标题（含副标题）之后第一个「……：」短段，顶格不缩进
+    seen_title = False
+    for idx, (t, obj, txt) in enumerate(out):
+        if t in ("title", "title_first", "title_mid", "title_last", "title_only", "subtitle"):
+            seen_title = True
+            continue
+        if not seen_title:
+            continue
+        if t in BLANK_KINDS:
+            continue
+        if t == "body" and txt and RE_ADDRESSEE.match(txt) and text_width(txt) <= 30:
+            out[idx] = ("addressee", obj, txt)
+        break
     # 附件续行：紧接“附件：XXX”之后的附件条目，需与冒号后首字对齐
     in_attach = False
     for idx, (t, obj, txt) in enumerate(out):
@@ -1335,6 +1814,15 @@ def classify(items, cfg):
             out[idx] = ("attach_wrap", obj, txt)
         else:
             in_attach = False
+    # 文末「附件1」下面那一行是附件标题：按大标题排（方正小标宋二号、居中）
+    for idx, (t, obj, txt) in enumerate(out):
+        if t != "attach_tag":
+            continue
+        j = idx + 1
+        while j < len(out) and out[j][0] in BLANK_KINDS:
+            j += 1
+        if j < len(out) and out[j][0] == "body":
+            out[j] = ("attach_title", out[j][1], out[j][2])
     # 表标题：紧邻表格之前的段落
     for idx, (t, obj, txt) in enumerate(out):
         if t != "tbl":
@@ -1371,6 +1859,14 @@ def classify(items, cfg):
         for idx in title_side:
             if out[idx][0] == "blank":
                 out[idx] = ("blank_title", out[idx][1], "")
+    # 主送机关上面的空行跟着顶格（标题侧那几行已经标记为 blank_title，不再改）
+    for idx, (t, _o, _x) in enumerate(out):
+        if t != "addressee":
+            continue
+        k = idx - 1
+        while k >= 0 and out[k][0] == "blank":
+            out[k] = ("blank_add", out[k][1], out[k][2])
+            k -= 1
     return out
 
 
@@ -1382,7 +1878,7 @@ def _spacer_props_ok(p_el, cfg):
     pPr = p_el.find(qn("w:pPr"))
     if pPr is None:
         return False
-    sp = pPr.find(qn("w:spacing"))
+    sp = _effective_spacing(pPr)
     if sp is None:
         return False
     if sp.get(qn("w:line")) != "0" or sp.get(qn("w:lineRule")) != "atLeast":
@@ -1397,7 +1893,7 @@ def _spacer_props_ok(p_el, cfg):
 def _write_spacer_props(p_el, cfg):
     """行高最小值 0 磅、字号 5 号、段前段后 0 —— 表标题与表格之间那一行。"""
     pPr = p_el.get_or_add_pPr()
-    sp = pPr.get_or_add_spacing()
+    sp = _sole_spacing(p_el)
     for key in ("w:beforeLines", "w:afterLines",
                 "w:beforeAutospacing", "w:afterAutospacing"):
         sp.attrib.pop(qn(key), None)
@@ -1489,26 +1985,32 @@ def _anchor_after_attach(seq, idx):
     return None
 
 
-def ensure_blank_lines(kinds, report, cfg):
+def ensure_blank_lines(kinds, report, cfg, dry_run=False):
     """段前段后一律 0 磅，空行改用独立空段落（整行）表达。
 
     按参考要求保证：标题上空 2 行、下空 1 行；附件说明前空 1 行、后空 2 行；
-    文末「附件1」标记前空 1 行；落款前空 2 行（仅 signature.enabled 时）。
+    文末「附件1」标记前空 1 行；落款前空 2 行（仅 signature.enabled 时）；
+    表标题前不留空行（0 行）。
+
+    dry_run=True 时只统计偏差、不改文档——check 模式靠它把空行问题一并报出来，
+    保证「check 通过 ⇒ apply 无改动」。
     """
     plan = {}
 
-    def bump(par, want, label, blank_kind="blank"):
-        if par is None or not want:
+    def bump(par, want, label, blank_kind="blank", rule="doc.blankLines"):
+        """want=0 表示「这里不许有空行」（表标题前），同样要登记，不能当成「无需处理」。"""
+        if par is None or want is None:
             return
         key = id(par._p)
         old = plan.get(key)
         if old is None or old[1] < want:
-            plan[key] = (par, want, label, blank_kind)
+            plan[key] = (par, want, label, blank_kind, rule)
 
     titles = [obj for k, obj, _t in kinds if k in ("title", "subtitle")]
     if titles:
         bump(titles[0], cfg["titleBlankBeforeLines"], "标题前", "blank_title")
         bump(_next_anchor_par(titles[-1]), cfg["titleBlankAfterLines"], "标题后", "blank_title")
+    cap_no = 0
     for idx, (k, obj, _t) in enumerate(kinds):
         if k == "attach_line":
             bump(obj, cfg["attachBlankBeforeLines"], "附件说明前")
@@ -1517,22 +2019,28 @@ def ensure_blank_lines(kinds, report, cfg):
             bump(_next_anchor_par(obj), cfg["attachTagBlankAfterLines"], "附件标记与附件标题之间")
         elif k == "sign_org" and cfg["signature"]["enabled"]:
             bump(obj, cfg["signature"]["blankLinesBefore"], "落款前")
+        elif k == "table_caption":
+            # 正文与表标题之间不留空行：参考件只规定「表标题与表格之间空一行」，
+            # 表格前面多敲的回车必须清掉，否则表标题会与正文拉开一整行。
+            cap_no += 1
+            bump(obj, 0, "表标题前（表%d）" % cap_no, "blank", "table.captionBlankBefore")
 
     touched = 0
-    for par, want, label, blank_kind in plan.values():
+    for par, want, label, blank_kind, rule in plan.values():
         cur = _count_blanks_before(par)
         if cur == want:
             continue
-        if cur < want:
-            for _ in range(want - cur):
-                _style_blank(par.insert_paragraph_before(), cfg, blank_kind)
-        else:
-            for _ in range(cur - want):
-                prev = par._p.getprevious()
-                if prev is None or not _is_blank_el(prev):
-                    break
-                prev.getparent().remove(prev)
-        report.want("doc.blankLines", "doc." + label,
+        if not dry_run:
+            if cur < want:
+                for _ in range(want - cur):
+                    _style_blank(par.insert_paragraph_before(), cfg, blank_kind)
+            else:
+                for _ in range(cur - want):
+                    prev = par._p.getprevious()
+                    if prev is None or not _is_blank_el(prev):
+                        break
+                    prev.getparent().remove(prev)
+        report.want(rule, "doc." + label,
                     "%d 个空行" % cur, "%d 个空行" % want)
         touched += 1
     return touched
@@ -1785,25 +2293,45 @@ def split_attach_paragraphs(doc, report, cfg):
 def _save(doc, path):
     tmp = path + ".tmp.docx"
     doc.save(tmp)
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except PermissionError:
+        # 目标是只读文件（或刚被复制过来的只读副本）：去掉只读位再替换一次
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            os.remove(tmp)
+            raise
 
 
 def light_pass(doc, report, cfg):
     """与版式无关的全局规范化：不论是否套用公文版式都执行。
 
+    - 一个段落只留一个 w:spacing（重复的会把行距“写对了却显示成旧值”）
     - 「换行和分页」里 6 个开关一律不启用
     - 中文里不写「」『』，改“”‘’
+    - 字符间距标准、时间冒号/小数点半角、日期统一、附件标记去冒号
     - 中文文段里的英文前后不留空格（并关闭 Word 自动中西文间距）
     """
     n = cfg["normalize"]
     pagination = n.get("paginationOff", True)
     quote = n.get("quotePair", True)
+    char_spacing = n.get("charSpacing", True)
     for i, par in enumerate(_iter_all_paragraphs(doc)):
         label = "l%d" % i
+        dedupe_spacing(par, report, label)
         if pagination:
             clear_pagination(par, report, label)
         if quote:
             quote_normalize(par, report, label)
+        _text_rules(par, report, label, cfg)
+        if char_spacing:
+            char_spacing_std(par, report, label)
+        snap_to_grid_off(par, report, label)
         _normalize_cjk_latin(par, report, label, cfg)
         auto_space_off(par, report, label)
     return report
@@ -1912,8 +2440,25 @@ def process(path, mode, cfg, full=True, profile=None):
             if cur is None or abs(cur.cm - m[key]) > 0.02:
                 report.want("page.margin." + key, "section", None if cur is None else round(cur.cm, 2), m[key],
                             (lambda s=section, a=attr, w=want: setattr(s, a, w)))
+        if cfg.get("pageSize", "A4") != "keep":
+            cur_w, cur_h = section.page_width, section.page_height
+            if (cur_w is None or abs(cur_w.cm - 21.0) > 0.05
+                    or cur_h is None or abs(cur_h.cm - 29.7) > 0.05):
+                desc = "%.2f×%.2f cm" % (cur_w.cm if cur_w else 0.0,
+                                         cur_h.cm if cur_h else 0.0)
+                report.want("page.size", "section", desc, "A4（21.00×29.70 cm）",
+                            (lambda s=section: (setattr(s, "page_width", Cm(21.0)),
+                                                setattr(s, "page_height", Cm(29.7)))))
         if cfg["pageNumber"]:
             set_footer(section, report, cfg, fix)
+
+    usable_cm = None
+    try:
+        sec0 = doc.sections[0]
+        if sec0.page_width is not None:
+            usable_cm = sec0.page_width.cm - cfg["marginsCm"]["left"] - cfg["marginsCm"]["right"]
+    except Exception:
+        usable_cm = None
 
     body = doc.element.body
     items = _collect_body(doc)
@@ -1933,9 +2478,15 @@ def process(path, mode, cfg, full=True, profile=None):
             items = _collect_body(doc)
             kinds = classify(items, cfg)
         ensure_blank_lines(kinds, report, cfg)
+        # 插完空行段落列表就变了：重新收集再定位“表标题 → 表格”的相邻关系
+        items = _collect_body(doc)
+        kinds = classify(items, cfg)
         format_table_caption_spacer(items, [k for k, _o, _t in kinds], report, cfg)
         items = _collect_body(doc)
         kinds = classify(items, cfg)
+    else:
+        # check：只报空行偏差，不动文档
+        ensure_blank_lines(kinds, report, cfg, dry_run=True)
 
     if not fix and cfg["attachSplit"]["enabled"]:
         split_attach_paragraphs(doc, report, cfg)
@@ -1952,16 +2503,19 @@ def process(path, mode, cfg, full=True, profile=None):
     for i, (kind, obj, txt) in enumerate(kinds):
         label = "p%d" % i
         if kind == "tbl":
-            style_table(obj, report, "t%d" % table_idx, cfg)
+            style_table(obj, report, "t%d" % table_idx, cfg, usable_cm)
             table_idx += 1
             continue
         if kind in BLANK_KINDS:
             style_par(obj, kind, report, label, cfg)
             continue
         if kind in ("body", "h1", "h2", "h3", "attach_line", "attach_cont",
-                    "attach_wrap", "table_caption") or kind.startswith("title"):
+                    "attach_wrap", "table_caption", "fig_caption", "addressee",
+                    "attach_title") or kind.startswith("title"):
             normalize_text(obj, report, label, cfg)
         style_par(obj, kind, report, label, cfg)
+        if kind == "attach_tag":
+            ensure_page_break(obj, report, label)
         if kind == "sign_org" and cfg["signature"]["enabled"]:
             _pad_signature(obj, report, label, cfg, kinds, i)
         if kind == "sign_date" and cfg["signature"]["enabled"]:
@@ -1986,18 +2540,141 @@ def process(path, mode, cfg, full=True, profile=None):
     return out
 
 
-def _pad_date(par, report, label, cfg):
+def _trail_spaces(txt):
+    """结尾全角空格的个数。"""
+    n = 0
+    for ch in reversed(txt):
+        if ch == "　":
+            n += 1
+        else:
+            break
+    return n
+
+
+WORDWRAP_SUCCESSORS = ("w:overflowPunct", "w:topLinePunct", "w:autoSpaceDE", "w:autoSpaceDN",
+                       "w:bidi", "w:adjustRightInd", "w:snapToGrid", "w:spacing", "w:ind",
+                       "w:contextualSpacing", "w:mirrorIndents", "w:suppressOverlap", "w:jc",
+                       "w:textDirection", "w:textAlignment", "w:textboxTightWrap", "w:outlineLvl",
+                       "w:divId", "w:cnfStyle", "w:rPr", "w:sectPr", "w:pPrChange")
+
+
+def _word_wrap_off(par, report, label):
+    """落款段落必须写 w:wordWrap="0"。
+
+    Word 右对齐默认把行尾空格排到版心外（等于没写），只有关掉 wordWrap
+    （界面上的「允许西文在单词中间换行」）行尾全角空格才计入行宽、把文字挤左。
+    参考文档的落款段落正是这个写法，所以手工敲的空格有效。
+    """
+    pPr = par._p.get_or_add_pPr()
+    el = pPr.find(qn("w:wordWrap"))
+    cur = None if el is None else el.get(qn("w:val"))
+    if cur in ("0", "false", "off"):
+        return
+
+    def apply():
+        p2 = par._p.get_or_add_pPr()
+        e2 = p2.find(qn("w:wordWrap"))
+        if e2 is None:
+            e2 = OxmlElement("w:wordWrap")
+            p2.insert_element_before(e2, *WORDWRAP_SUCCESSORS)
+        e2.set(qn("w:val"), "0")
+
+    report.want("signature.wordWrap", label,
+                "未关闭（Word 会忽略行尾空格）" if cur is None else "wordWrap=%s" % cur,
+                "wordWrap=0（行尾空格参与对齐）", apply)
+
+
+def _right_indent_pt(par):
+    pPr = par._p.find(qn("w:pPr"))
+    if pPr is None:
+        return 0.0
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        return 0.0
+    raw = ind.get(qn("w:right"))
+    return int(raw) / 20.0 if raw is not None else 0.0
+
+
+def _clear_right_indent(par):
+    pPr = par._p.find(qn("w:pPr"))
+    if pPr is None:
+        return
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        return
+    for a in ("w:right", "w:rightChars"):
+        if ind.get(qn(a)) is not None:
+            del ind.attrib[qn(a)]
+
+
+def _set_tail_ideo(par, count, report, label, rule):
+    """把段落尾部的全角空格设为 count 个（单独一个 run，仿宋三号）。"""
+    count = int(max(0, round(float(count))))
     txt = par.text
-    pad = cfg["signature"]["datePadSpaces"]
-    want = txt.rstrip("\u3000 ") + "\u3000" * pad
-    if par.runs and not txt.endswith("\u3000" * pad):
-        last = par.runs[-1]
-        report.want("signature.datePad", label, txt, want,
-                    (lambda r=last, w=want, cur=txt: setattr(r, "text", r.text + "\u3000" * pad)))
+    base = txt.rstrip("　 ")
+    ok_count = (_trail_spaces(txt) == count and len(txt) == len(base) + count)
+    ok_indent = _right_indent_pt(par) == 0.0
+    if ok_count and ok_indent:
+        return
+
+    def apply():
+        _replace_par_text(par, base)
+        _clear_right_indent(par)
+        if not count:
+            return
+        r = OxmlElement("w:r")
+        rPr = OxmlElement("w:rPr")
+        rf = OxmlElement("w:rFonts")
+        rf.set(qn("w:ascii"), "Times New Roman")
+        rf.set(qn("w:hAnsi"), "Times New Roman")
+        rf.set(qn("w:cs"), "Times New Roman")
+        rf.set(qn("w:eastAsia"), "仿宋")
+        rPr.append(rf)
+        hint = OxmlElement("w:hint")
+        hint.set(qn("w:val"), "eastAsia")
+        rPr.append(hint)
+        for tag in ("w:sz", "w:szCs"):
+            e = OxmlElement(tag)
+            e.set(qn("w:val"), "32")
+            rPr.append(e)
+        r.append(rPr)
+        t = OxmlElement("w:t")
+        t.set(qn("xml:space"), "preserve")
+        t.text = "　" * count
+        r.append(t)
+        par._p.append(r)
+
+    report.want(rule, label,
+                "尾部 %d 个全角空格%s" % (_trail_spaces(txt),
+                                          "" if ok_indent else "、右缩进 %g 磅" % round(_right_indent_pt(par), 1)),
+                "尾部 %d 个全角空格、无右缩进" % count, apply)
+
+
+def _pad_date(par, report, label, cfg):
+    """日期行：尾部留 datePadSpaces 个全角空格（对齐靠 wordWrap=0 + 右对齐）。"""
+    pad = float(cfg["signature"]["datePadSpaces"])
+    _word_wrap_off(par, report, label)
+    _set_tail_ideo(par, pad, report, label, "signature.datePad")
+
+
+def _norm_date_text(s):
+    """把日期文本规范化成「YYYY年M月D日」，用于量宽度。
+
+    署名要按日期宽度算空格数，而日期文本的规范化可能在本次流程稍后才发生，
+    直接量原文会算错（`2024.10.27` 是 5 字，`2024年10月27日` 是 7 字）。
+    """
+    t = s.strip()
+    m = RE_DATE_LOOSE.fullmatch(t)
+    if m:
+        return "%s年%d月%d日" % (m.group(1), int(m.group(2)), int(m.group(3)))
+    return t
 
 
 def _pad_signature(par, report, label, cfg, kinds, i):
-    """按参考样例给署名补尾部全角空格：无需盖章→与日期左边缘对齐；需盖章→居中对齐。"""
+    """按规范第 10 条排署名（右对齐 + 右缩进）：
+    无需盖章 → 署名第一个字超出日期 orgOverhangSpaces 个全角；
+    需盖章   → 署名与日期中心轴对齐。
+    """
     date_txt = None
     for j in range(i + 1, len(kinds)):
         if kinds[j][0] == "sign_date":
@@ -2005,19 +2682,18 @@ def _pad_signature(par, report, label, cfg, kinds, i):
             break
     if not date_txt:
         return
-    need = text_width(date_txt.rstrip("\u3000 ")) + cfg["signature"]["datePadSpaces"]
-    mine = text_width(par.text.rstrip("\u3000 "))
+    dp = float(cfg["signature"]["datePadSpaces"])
+    ov = float(cfg["signature"].get("orgOverhangSpaces", 2))
+    dw = text_width(_norm_date_text(date_txt))
+    base = par.text.rstrip("　 ")
+    sw = text_width(base)
     if cfg["signature"]["seal"]:
-        pad = int(round((need - mine) / 2))
+        pad = dp + dw / 2.0 - sw / 2.0
     else:
-        pad = int(round(need - mine))
-    pad = max(cfg["signature"]["datePadSpaces"], pad)
-    want = par.text.rstrip("\u3000 ") + "\u3000" * pad
-    if par.runs and par.text != want:
-        last = par.runs[-1]
-        cur = par.text
-        report.want("signature.orgPad", label, cur.strip("\u3000"), want.strip("\u3000"),
-                    (lambda r=last, d=pad, c=cur: setattr(r, "text", c.rstrip("\u3000 ") + "\u3000" * d)))
+        pad = dp + dw + ov - sw
+    pad = max(0.0, pad)
+    _word_wrap_off(par, report, label)
+    _set_tail_ideo(par, pad, report, label, "signature.orgPad")
 
 
 def doc_text(path):

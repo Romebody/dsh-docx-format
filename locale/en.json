@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Official document formatting",
-    "description": "Auto-apply the general official document format to every generated .docx."
+    "description": "Auto-apply the general official document format to every generated .docx (fonts, sizes, leading, indents, margins, tables, page numbers). Defaults to the standard font tier — 方正小标宋简体 / 仿宋 / 黑体 / 楷体, NOT the GBK/GB2312 tier. To use 方正小标宋_GBK / 仿宋_GB2312 / 方正黑体_GBK / 楷体_GB2312, enable the \"严格公文格式\" component row in this bundle, or say 严格公文格式 in the conversation (current session only)."
   },
   "title": "Docx format",
   "toolName": "docx_format",
@@ -15,6 +15,8 @@
     "triggerKeywords": "trigger words; the request text must contain one of them for the full layout, default ['公文']",
     "globalNormalize": "still apply global normalization when no trigger word matched (pagination off, Chinese quotes, no CJK-Latin spacing)",
     "autoFormat": "queue any .docx path seen in tool results",
-    "formatExisting": "also normalize files created before the plugin loaded"
+    "formatExisting": "also normalize files created before the plugin loaded",
+    "strictKeywords": "when the request contains one of these, the strict tier applies to this session only (no row toggle, no config write; a new session or a restart falls back to the standard tier)",
+    "pageSize": "Page size: A4 (21.0x29.7cm, as required) or keep (keep the source page size)"
   }
 }

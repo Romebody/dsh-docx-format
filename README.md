@@ -6,6 +6,10 @@
 
 让 DSH 生成的所有 `.docx` 自动符合《通用公文格式规范》。
 
+字体**默认是普通档**（方正小标宋简体 / 仿宋 / 黑体 / 楷体），**不是** GBK/GB2312 那一套；
+要 GBK 档（方正小标宋_GBK / 仿宋_GB2312 / 方正黑体_GBK / 楷体_GB2312），打开插件页「包含的组件」里的
+「严格公文格式」那一行；在会话里说「严格公文格式」只在当前对话内临时生效。
+
 三层生效方式，任一层命中就够：
 
 | 层 | 机制 | 作用 |
@@ -16,10 +20,76 @@
 
 真正的排版逻辑在 `lib/docxfmt.py`（python-docx），插件只负责调度进程。
 字体检测/授权/安装单独放在 `lib/fontcheck.py`（纯标准库，不联网检测，下载要用户点头）。
+严格档的开关是宿主插件页「包含的组件」里的一行（独立包 `strict-switch/`），那颗开关写的是 Loader 的启用态。
+
+## v1.3.3 新增（对着规范逐条补齐）
+
+- **纸张 A4**：`w:pgSz` 写 11906×16838 twips（21.0×29.7cm），不再沿用源文档的 Letter/B5。
+  想保留原纸张：`defaults.pageSize: keep`。
+- **表格版面**（作业三的实测问题）：
+  - `w:tblLayout w:type="fixed"`，整表宽 = 版心 − 2×0.19cm（A4 下 8629 twips ≈ 15.22cm），左缩进 0，居中；
+    列宽按各列字数加权分配、下限 1.2cm，列宽合计等于整表宽 —— 不再出现「右边界溢出 5pt」「表格整体右移 4.9pt」。
+  - 删掉单元格自带的 `w:tcBorders`（源文档里 12/4 的边框会把外框撑成 1.5 磅），只留一条 `w:tblBorders`（外 1.5 磅、内 0.5 磅）；
+    合并单元格单独补朝外边。同时清 `w:tblCellSpacing`、删 `w:tblpPr`/`w:tblOverlap`（无文字环绕）。
+- **一个段落只能有一个 `w:spacing`**：真实文档里常见「0/atLeast + 240/auto」两个并存，Word 只认最后一个，
+  于是「表标题下面那行设了 0 磅却还是 12 磅」。`dedupe_spacing()` 合并成一节点、保留生效值（`par.spacingDup`）。
+- **文本级规范补齐**：时间冒号半角（`text.timeColon`）、小数点半角（`text.numberHalfDot`）、
+  单独成段的日期统一成 `2024年10月27日`（`text.dateFormat`）、文末「附件1：」去冒号（`text.attachTagColon`）、
+  字符间距「标准」（`run.charSpacing`，只在源文档写过非 0 值时才改）、段落不挂网格（`par.snapToGrid`）、
+  浮动图片转嵌入型（`image.inline`）。
+- **健壮性**：`w:highlight w:val="none"` 之类 python-docx 枚举映射不到的值不再让引擎崩（`ValueError: WD_COLOR_INDEX has no XML mapping`），
+  改为直接读 XML、删节点。
+- **检查器读「生效值」**：所有 `w:spacing` 读取统一走 `_effective_spacing()`（取最后一个），不再读第一个 —— 这是之前 check 假通过的根因。
+- **副标题判定不吃表标题**：「表 1 xxx」紧跟在文档标题后面时不再被当成副标题（`RE_CAPTION_LEAD`）。
+- 新增 5 套测试：`smoke_spacing_dup.py`、`smoke_pipeline_order.py`、`smoke_robust.py`、`smoke_table_layout.py`、`smoke_spec_matrix.py`。
+
+### v1.3.3 补充（做「全要素样例」时补掉的问题）
+
+- **图注**：`图 1  xxx` 单段识别为图注（`RE_FIG_CAPTION`），排成仿宋 10.5pt、居中、无首行缩进，不再当正文缩进两字。
+- **文末附件标题**：「附件1」下面紧接的那一行按大标题排（方正小标宋二号、居中），不再走正文格式。
+- **落款识别**：带附件的公文落款在文档中间，原逻辑只看末尾 6 段找不到。现在遍历全篇，
+  取「整段是一个日期、宽度≤26 字、且其后紧跟空段或「附件N」」的最后一个作日期，其上一段作署名。
+- **正文内联日期/时间**：`dateFormat` 不再只认「整段是日期」，正文里 `2024.10.27` 也会改成 `2024年10月27日`；
+  `text.timeColon` 用 `RE_TIME_FULL` 处理 `9：30`、`15：30：05`（原来的 lookahead 太严，`9：30在…` 匹配不到）。
+- **附件条目序号点**：`附件：1.2026年度…`、`2.2026年度…` 的点全角化；并修掉「小数点半角」把它们又掰回半角的反向打架。
+- **列宽按视觉宽度加权**：汉字 1.0、数字字母 0.55，权重上限 14、单列下限 2.0cm —— 电话号码不再把「联系人」列挤成折行。
+  列宽回读按 20 twips 容差判定，避免 Twips→EMU→twips 的舍入让 check 永远报一条假偏差。
+- **只读文件**：目标是只读副本时 `os.replace` 会 `PermissionError`，改为去掉只读位重试一次。
+- **主送机关顶格**：「各学院、各学生组织：」这类称呼性首行识别为 `addressee`，**不缩进**、左对齐；
+  它上面那一两个空行也跟着顶格（`blank_add`），否则空行看起来比正文还缩进。
+- **附件前分页**：正文（含落款）与附件正文之间、附件与附件之间插**分页符**（`w:br w:type="page"`），
+  规则名 `par.pageBreak`。刻意不用 `w:pageBreakBefore` —— 那属于「换行和分页」六项，规范要求一律关闭，
+  用段落属性会跟全局规则互相打架；分页符是正文里的 run，两者互不影响。
+
+## v1.3.2 新增
+
+- **严格档只有一个持久真源**：插件页「包含的组件」里 `严格公文格式` 那一行的启用态。
+  - 组件行开关 → 宿主 `pluginManager.setPluginEnabled()` → Loader 启用/停用那一行，重启仍保持；
+  - `docx_format({ mode: 'config', enabled: true })` 切的是**同一颗开关**（值没变不会重复切，省一次 Loader 重载）；
+  - 想长期锁死，就在 `cordis.patch.yml` 那一行写 `disabled: true`。
+- **配置项 `strictFonts` 已删除**：`effectiveStrict = 组件行启用态 || 本会话命中过 strictKeywords`。
+  老配置里写了 `strictFonts: true` 的，启动时自动迁移成组件行启用态（日志有「迁移」一行），之后不再读这个键。
+- **请求词改为「只在当前对话内生效」**：会话里说「严格公文格式」→ 该会话后续请求走严格档，
+  **不切组件行、不改配置文件、不落盘**；换会话或重启即回普通档。
+- **插件介绍里写明了默认档**：默认 方正小标宋简体 / 仿宋 / 黑体 / 楷体，**不是** GBK/GB2312 那一套。
+- 为什么必须用独立包 `strict-switch/`：patch 行的 `EntryOptions` 只有 `id / name / config / group / disabled / inject`，
+  **没有 meta**；组件行的标题与描述只能取自被引用包的 `locale/*.json` 的 `meta.*`。
+  与主插件共用一份 locale 会把两行写成同一个标题，分不开。
+- **删掉了 v1.3.0 的自绘 Web 开关**：`lib/client.js`、`package.json` 的 `dsh.client`、两条 HTTP 路由
+  （`/api/dsh-docx-format/state`、`/api/dsh-docx-format/strict-fonts`）、`locale` 里的 `ui.*` 全部移除。
+  包内不再有任何自定义 HTTP 端点，也不再需要同源 `Origin` 校验。
+
+### 切严格档的两个持久入口 + 一个临时入口
+
+1. 插件页 → 本插件 → 「包含的组件」→ **严格公文格式** 那一行右侧的开关（推荐，持久）；
+2. 让 Agent 调 `docx_format({ mode: 'config', enabled: true })`（持久，写的是同一颗开关）；
+3. 在对话里说「严格公文格式」（**只在当前会话内**，不动开关也不改配置）。
+
+组件行打开后不再看请求词，一律 GBK/GB2312 一档；关掉则回普通档。
 
 ## v1.2.0 新增
 
-- **两档字体**：默认 standard；请求里出现「严格公文格式」或配置 `strictFonts: true` 时切 strict（GBK/GB2312 一套）。
+- **两档字体**：默认 standard；请求里出现「严格公文格式」或组件行开启时切 strict（GBK/GB2312 一套）。
 - **字体自检 + 授权安装**：`mode="fonts"` 报缺哪几个；缺字体**不阻断排版**；
   用户在当前对话里同意后，`mode="installFonts", confirm=<token>` 才下载安装（令牌一次性、10 分钟）。
   字体包不进 npm 包，仓库里没有任何 ttf。
@@ -90,10 +160,26 @@
   引擎会给每个段落写 `w:autoSpaceDE="0" w:autoSpaceDN="0"`（规则名 `par.autoSpace`），
   PDF 里实测 `的AI素养`、`OA系统`、`Word文档` 之间已无空隙。
 - 表格：标题 方正小标宋简体二号；表头 黑体小四、表内容 仿宋小四；**所有单元格段落水平+垂直居中**、单倍行距；外边框 1.5 磅、内边框 0.5 磅；行高最小值 0.7cm；表格居中无环绕；两字词语中间加两个半角空格（`姓  名`）；表标题与表格之间插一行 0 行高、10.5pt 的空段。
+  **正文与表标题之间不留空行**（规范只要求「表标题与表格之间空一行」）：表格前面多敲的回车会被删掉，规则名 `table.captionBlankBefore`，期望 0 行。
 - 图片：图片单独成段，**居中 + 无缩进（首行/左/右/悬挂全 0）+ 单倍行距**（`w:line="240" w:lineRule="auto"`，
   不走 29 磅固定值，避免图片被裁或行高被拉死），段前段后仍 0；判定规则 `par.lineSingle`。
 - 页码：页脚居中 `— 1 —`，宋体四号(14pt)，字段拆成 6 个 run，保证 Word / LibreOffice 都渲染成 `— N —`。
-- 落款（**只在用户明确要求时才有**）：正文后空两行（两个空段落）、右对齐；日期末尾补两个全角空格；署名与日期右边缘对齐（需盖章时署名居中于日期，`seal: true`）。
+- 落款（**只在用户明确要求时才有**）：正文后空两行（两个空段落）、右对齐。
+  日期在末尾留两个全角空格的宽度，署名与日期的水平关系按两种情形分别算：
+  **无需盖章**（`seal: false`）——署名第一个字比日期第一个字往左偏两个全角字（`orgOverhangSpaces`，默认 2）；
+  **需盖章**（`seal: true`）——署名与日期中心轴对齐。
+  实现上**就在行尾补真正的全角空格**（与手工敲的一致，验收看字符数），空格数按两种情形算：
+  **无需盖章** = `datePadSpaces + (日期宽 − 署名宽) + orgOverhangSpaces`；
+  **需盖章** = `datePadSpaces + (日期宽 − 署名宽) / 2`；署名比日期还宽时收敛到 0。
+  3 字署名 + 7 字日期 → 署名 8 格、日期 2 格（与规范截图 Eg1 一致）；盖章 3 字 → 4 格（Eg2）。
+  规则名 `signature.datePad` / `signature.orgPad`。
+  - **必须同时写 `w:wordWrap="0"`**（规则名 `signature.wordWrap`，对应界面「允许西文在单词中间换行」）：
+    Word 右对齐默认把行尾空格排到版心外、文字纹丝不动，只有关掉 wordWrap 空格才计入行宽、把文字挤左。
+    参考文件的落款段落正是这个写法——这就是「手工敲空格有效、程序补空格无效」的全部原因。
+  - 段落还要关掉 `w:autoSpaceDE/DN`：否则 Word 在数字与汉字之间加约 20 磅空隙，
+    日期实际宽度比按字数估算的大，空格数会算少 2 格。
+  - 补空格的 run 要单独建：`rFonts` 的 `ascii/hAnsi/cs` 是 Times New Roman、`eastAsia` 是仿宋、加 `w:hint="eastAsia"`；
+    若整段都写仿宋，`style_runs` 会判 `run.font.latin` 不符，第一次 apply 就修不干净。
 - 附件：`附件：1．xxx` 前空 1 行、下与落款空 2 行；缩进阶梯是 2 / 6 / 5 / 6 **字符**，靠真实分段实现：
   第一段 `firstLineChars="200"`、续行段 `600`、`2．…` 段 `500`、它的续行又是 `600`，左右悬挂全 0；
   折行点由 Word 排版实测（`wdFirstCharacterLineNumber`）后自动拆段，拆完每段在版面里正好一行；
@@ -146,7 +232,7 @@ docx_format(mode="installFonts", confirm="<token>")              # 用户同意�
 | 档位 | 何时用 | 大标题 / 表标题 | 正文 / 三级 | 一级标题 | 二级标题 |
 |---|---|---|---|---|---|
 | `standard`（默认） | 一般场合 | 方正小标宋简体 | 仿宋 | 黑体 | 楷体 |
-| `strict` | 请求里出现「严格公文格式」/「严格公文」，或配置 `strictFonts: true` | 方正小标宋_GBK | 仿宋_GB2312 | 方正黑体_GBK | 楷体_GB2312 |
+| `strict` | 「严格公文格式」组件行处于启用态，或本会话里说过「严格公文格式」/「严格公文」 | 方正小标宋_GBK | 仿宋_GB2312 | 方正黑体_GBK | 楷体_GB2312 |
 
 数字与字母两档都用 Times New Roman。严格档依据 GB/T 9704-2012 的 GBK 系列字形（与 `lib/fontcheck.py` 的 `PRESETS['gongwen-strict']` 一致）。
 
@@ -210,14 +296,29 @@ dsh plugin --profile <profile> add dsh-docx-format
 
 收录进插件市场后，也可以直接在市场里搜 `docx` 点安装。
 
+⚠️ 包里有**两条** patch 行：`dsh-docx-format`（主插件）与 `dsh-docx-format-strict`（严格公文格式组件行）。
+后者是独立包，已作为**依赖**写进主包的 `package.json`（`"dsh-docx-format-strict": "1.0.0"`），
+所以 `npm i dsh-docx-format`（或市场一键安装）会把它一起装上，插件页「包含的组件」会显示两行，
+第二行就是那颗持久开关。排版功能不依赖它——即使它加载失败，严格档仍可用「会话里说请求词」这条临时入口。
+
 ### 方式二：本地目录（开发调试）
 
 1. 把 `dsh-docx-format` 整个目录放到任意位置（记为 `<PLUGIN_DIR>`）。
 2. profile 的 `package.json` 里 `dependencies` 增加 `"dsh-docx-format": "link:<PLUGIN_DIR>"`；
    已发布到 npm 时直接写版本号，如 `"dsh-docx-format": "^1.0.0"`。
 3. 同一个 `package.json` 的 `dsh.profile.bundles` 追加 `"dsh-docx-format"`。
-4. `node_modules/dsh-docx-format` 指向该目录（junction / pnpm link / npm install 均可）。
+4. 再给组件行加一条链接依赖（严格档开关就落在这一行上）：
+   `"dsh-docx-format-strict": "link:<PLUGIN_DIR>/strict-switch"`，
+   并让 `node_modules/dsh-docx-format-strict` 指向 `<PLUGIN_DIR>/strict-switch`。
+   （只有 `link:` 开发方式才需要手工做这一步；从 npm 安装时它随依赖自动就位。）
 5. 重启 dsh。
+
+> Windows 上直接建 junction 也行（不需要跑包管理器）：
+> `New-Item -ItemType Junction -Path "<profile>
+ode_modules\dsh-docx-format-strict" -Target "<PLUGIN_DIR>\strict-switch"`
+>
+> 只想装主插件、不要那颗组件行开关，就跳过第 4 步——插件页会多出一行「异常」，
+> 严格档只剩「会话里说请求词」这条临时入口。
 
 环境要求：Node ≥ 20；Python 3.9+ 与 `python-docx`（DSH 自带运行时里已有）。
 装了 Word 或 WPS 时附件会自动按实测折行拆段；没有则退回 2/5 字符缩进、不拆段。
@@ -237,8 +338,7 @@ dsh plugin --profile <profile> add dsh-docx-format
 | `triggerKeywords` | `['公文']` | **触发词**：会话最后一条用户消息必须含其中之一才套完整版式；空数组 = 任何请求都套完整版式 |
 | `globalNormalize` | `true` | 没命中触发词时仍做全局规范化（`--light`）；改 `false` 则彻底不碰文件 |
 | `maxFilesPerTurn` | `8` | 一轮最多自动处理几个文件 |
-| `strictFonts` | `false` | `true` = 一律用严格档字体（GBK/GB2312） |
-| `strictKeywords` | `['严格公文格式','严格公文']` | 请求里出现这些词就切严格档 |
+| `strictKeywords` | `['严格公文格式','严格公文']` | 会话里出现这些词 → **只在该会话内**切严格档（不切组件行、不改配置） |
 | `fontCheck.enabled` | `true` | 关掉则完全不做字体检测（`--no-font-check`） |
 | `fontCheck.autoInstall` | `ask` | 只认 `ask`（等用户授权）/`off`；不会自己下载 |
 | `prompt.enabled / order` | `true / 3260` | 提示词段开关与排序 |
@@ -256,6 +356,16 @@ dsh plugin --profile <profile> add dsh-docx-format
 | `attachSplit.maxRounds` | `12` | 长条目要拆成多段，最多迭代几轮 |
 | `attachSplit.minCharsToMeasure` | `20` | 短于此长度的条目直接跳过，不启动 Word |
 
+落款相关键（同样写进 `defaults`）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `signature.enabled` | `true` | 关掉则完全不处理落款（提示词仍要求“用户没提就不写落款”） |
+| `signature.seal` | `false` | `true` = 需盖章：署名与日期中心轴对齐 |
+| `signature.datePadSpaces` | `2` | 日期末尾补的全角空格数（真字符，配合 `wordWrap=0`） |
+| `signature.orgOverhangSpaces` | `2` | 无需盖章时，署名首字比日期首字左移的全角空格数（直接体现在署名行尾的空格数里） |
+| `signature.blankLinesBefore` | `2` | 正文与落款之间空几行 |
+
 副标题相关键（同样写进 `defaults`）：
 
 | 键 | 默认 | 说明 |
@@ -266,6 +376,17 @@ dsh plugin --profile <profile> add dsh-docx-format
 | `subtitle.gapTolerance` | `1` | 主标题与副标题之间最多容忍几个空行（会被删掉） |
 | `normalize.quotePair` | `true` | `「」『』` → `“”‘’` |
 | `normalize.paginationOff` | `true` | 段落「换行和分页」六项全关 |
+| `pageSize` | `A4` | 纸张：`A4`（11906×16838 twips）/ `keep`（保留源文档原纸张） |
+
+文本级规范化键（v1.3.3，写进 `defaults.normalize`）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `charSpacing` | `true` | 字符间距取「标准」（`run.charSpacing`） |
+| `timeColon` | `true` | 时间冒号半角：`9：30` → `9:30`（`text.timeColon`） |
+| `numberHalfDot` | `true` | 小数点全角点 → 半角：`1．5` → `1.5`（`text.numberHalfDot`） |
+| `attachTagColon` | `true` | 文末「附件1：」去掉冒号（`text.attachTagColon`） |
+| `dateFormat` | `true` | 单独成段的日期统一成 `2024年10月27日`（`text.dateFormat`） |
 
 字体相关键（同样写进 `defaults`）：
 
@@ -284,7 +405,8 @@ dsh-docx-format/
 ├── index.js            # 插件入口：工具 + 提示词 + 结果钩子 + 请求文字白名单
 ├── lib/docxfmt.py      # 排版引擎（apply/check，命令行可用）
 ├── lib/fontcheck.py    # 字体检测/授权/下载/安装（纯标准库）
-├── cordis.patch.yml    # bundle patch（insert 一行配置）
+├── cordis.patch.yml    # bundle patch（insert 两行：主插件 + 严格公文格式组件行）
+├── strict-switch/      # 独立包 dsh-docx-format-strict：只提供「组件行 + 启用开关」
 ├── locale/zh.json      # 展示文案
 ├── locale/en.json
 ├── icon.svg
@@ -298,6 +420,9 @@ dsh-docx-format/
 - `无法启动 python`：在配置里写死 `python` 路径。
 - 旧文件不自动改：默认 `formatExisting: false`，用 `docx_format` 指定文件，或把它改成 `true`。
 - 只想看问题：`docx_format(mode="check")` 打印逐条 `规则 x次数 where 当前 -> 期望`。
+- 严格档开关找不到：插件页「包含的组件」里应有第二行**严格公文格式**；没有就是 `dsh-docx-format-strict`
+  没装好（profile 的 dependencies 要有 `link:<插件目录>/strict-switch`），该行会显示「异常」，
+  此时严格档只剩「会话里说请求词」这条临时入口。自测：`node tools/smoke_strict_row.mjs`。
 - 自测：`node tools/smoke_whitelist.mjs`（工作区根目录），`python tools/smoke_attach_split.py`
   （附件 2/6/5/6 阶梯 + Word 实测每段一行 + 幂等），`python tools/smoke_blank_fmt.py`
   （空段落字体/字号/对齐/缩进是否与前后文一致、幂等），`python tools/smoke_image_line.py`
@@ -309,7 +434,7 @@ dsh-docx-format/
   它会给出“当前字体/字号/对齐 -> 期望值”，`apply` 会就地重写段落标记的 `w:pPr/w:rPr`。
 - 报缺字体：先 `docx_format(mode="fonts")` 看清单，不要凭印象猜。缺的字体装在**用户目录**时，
   以管理员身份启动的 Word 看不到（Windows 既有行为），用普通权限打开即可。
-- 严格档没换成 GBK 字体：确认请求里有「严格公文格式」，或配置 `strictFonts: true`；
+- 严格档没换成 GBK 字体：确认「严格公文格式」组件行是启用的，或在该会话里说过「严格公文格式」；
   `--fonts --font-profile strict` 会列出严格档要的 6 个字体。
 - 授权令牌报「无效或已过期」：令牌只存内存、10 分钟、用一次即失效；重新跑 `mode="fonts"` 取新的。
 - 字体自测：`python tools/smoke_fonts.py`（两档检测、缺字体不阻断、`font.missing`、假令牌、

@@ -48,13 +48,11 @@ const DEFAULTS = {
   triggerKeywords: ['公文'],
   // 没提触发词时是否仍做全局规范化（分页开关、中文引号、中英之间去空格）
   globalNormalize: true,
-  // 字体档位：standard = 方正小标宋简体/仿宋/黑体/楷体；
-  // strict = 方正小标宋_GBK/仿宋_GB2312/方正黑体_GBK/楷体_GB2312（GB/T 9704-2012 的 GBK 系列）
-  strictFonts: false,
-  // 请求里出现这些词时改用 strict 档（strictFonts=true 则一律 strict）
+  // 字体档位的**持久真源只有一个**：插件页「包含的组件」里「严格公文格式」那一行的启用态。
+  // standard = 方正小标宋简体/仿宋/黑体/楷体；strict = 方正小标宋_GBK/仿宋_GB2312/方正黑体_GBK/楷体_GB2312。
+  // 请求里出现下面这些词时，只在本会话内临时切严格档：不切组件行、不写配置、重启或换会话即恢复。
   strictKeywords: ['严格公文格式', '严格公文'],
-  // 字体自检：enabled=false 关掉检测；autoInstall 只认 'ask'（等用户授权）/'off'，
-  // 'auto' 目前不自动执行——下载安装必须由用户在对话里点头。
+  // 字体自检：enabled=false 关掉检测；autoInstall 只认 'ask'（等用户授权）/'off'。
   fontCheck: { enabled: true, autoInstall: 'ask' },
   prompt: { enabled: true, order: 3260 },
   tool: { enabled: true },
@@ -71,9 +69,9 @@ function normalizeConfig(config) {
     : fallback)
   cfg.triggerKeywords = toKeywords(cfg.triggerKeywords, DEFAULTS.triggerKeywords)
   cfg.strictKeywords = toKeywords(cfg.strictKeywords, DEFAULTS.strictKeywords)
-  cfg.strictFonts = cfg.strictFonts === true
   cfg.fontCheck = { ...DEFAULTS.fontCheck, ...(config?.fontCheck ?? {}) }
   cfg.fontCheck.enabled = cfg.fontCheck.enabled !== false
+  cfg.fontCheck.autoInstall = cfg.fontCheck.autoInstall === 'off' ? 'off' : 'ask'
   cfg.globalNormalize = cfg.globalNormalize !== false
   cfg.prompt = { ...DEFAULTS.prompt, ...(config?.prompt ?? {}) }
   cfg.tool = { ...DEFAULTS.tool, ...(config?.tool ?? {}) }
@@ -300,6 +298,83 @@ function matchKeyword(text, keywords) {
   return undefined
 }
 
+/* ------------------------------------------------- 严格档组件行（宿主插件页那颗开关） */
+
+/** 「严格公文格式」是 cordis.patch.yml 里的第二条 insert 行，它的启用态就是严格档开关。 */
+const STRICT_ROW_ID = 'docx-format-strict'
+
+/**
+ * 严格公文格式开关的**唯一持久写入口**：只切「严格公文格式」组件行的启用态。
+ * 那一行就是 Loader 的 entry，插件页那颗开关写的就是它；所以这里只调 setPluginEnabled，
+ * 不再往插件配置里写 strictFonts（旧键已删除，只在启动时做一次性迁移）。
+ */
+async function setStrictRow(pluginManager, value) {
+  const want = value === true
+  const row = await syncStrictRow(pluginManager, want)
+  if (!row.synced) return { ok: false, reason: row.reason }
+  return { ok: true, enabled: want, reason: row.reason }
+}
+
+/** 把「严格公文格式」组件行切到 want；只在值真的不同才写（写一次就是一次 Loader 重载）。 */
+async function syncStrictRow(pluginManager, want) {
+  if (!pluginManager || typeof pluginManager.setPluginEnabled !== 'function') {
+    return { synced: false, reason: 'no-plugin-manager' }
+  }
+  let row
+  try {
+    row = await strictRowState(pluginManager)
+  } catch (error) {
+    return { synced: false, reason: error?.message ?? String(error) }
+  }
+  if (!row.found || !row.entryId) return { synced: false, reason: 'row-not-found' }
+  if (row.enabled === want) return { synced: true, reason: 'unchanged' }
+  try {
+    await pluginManager.setPluginEnabled(row.entryId, want)
+    return { synced: true }
+  } catch (error) {
+    return { synced: false, reason: error?.message ?? String(error) }
+  }
+}
+
+/** 读「严格公文格式」组件行的现状：{ found, enabled, entryId }。 */
+async function strictRowState(pluginManager) {
+  if (!pluginManager || typeof pluginManager.listPlugins !== 'function') {
+    return { found: false, enabled: false, entryId: undefined }
+  }
+  const list = await pluginManager.listPlugins()
+  const hit = Array.isArray(list)
+    ? list.find((p) => p && (p.patchId === STRICT_ROW_ID
+      || p.id === STRICT_ROW_ID
+      || (typeof p.id === 'string' && p.id.endsWith(':' + STRICT_ROW_ID))))
+    : undefined
+  if (!hit) return { found: false, enabled: false, entryId: undefined }
+  return { found: true, enabled: hit.enabled === true, entryId: hit.entryId ?? hit.id }
+}
+
+/* 会话内临时严格档：请求词命中只影响本会话，不落盘、不写配置、不切组件行。
+ * 上限 64 个会话，超了淘汰最早的（Map 保序）；进程重启即空。 */
+const SESSION_STRICT_MAX = 64
+const sessionStrict = new Map()
+
+function markSessionStrict(sessionId) {
+  if (!sessionId) return
+  sessionStrict.delete(sessionId)
+  sessionStrict.set(sessionId, true)
+  while (sessionStrict.size > SESSION_STRICT_MAX) {
+    const oldest = sessionStrict.keys().next().value
+    sessionStrict.delete(oldest)
+  }
+}
+
+function isSessionStrict(sessionId) {
+  return sessionId ? sessionStrict.has(sessionId) : false
+}
+
+/** 有效严格档：组件行处于启用态，或本会话命中过请求词（两者取或）。 */
+function strictOn(row, sessionId) {
+  return row?.enabled === true || isSessionStrict(sessionId)
+}
+
 /* ------------------------------------------------------------ 插件主体 */
 
 export function apply(ctx, config) {
@@ -315,6 +390,31 @@ export function apply(ctx, config) {
 
   const log = (level, ...args) => {
     try { ctx.logger?.[level]?.(...args) } catch { /* ignore */ }
+  }
+
+  /* ---- 「严格公文格式」组件行：缓存 + 后台刷新 ----
+   * requestGate 是同步的，而 listPlugins() 是异步的，所以门控只读缓存，
+   * 缓存过期（>1.5s）时点火一次后台刷新，不阻塞本条请求。 */
+  const pluginManager = () => {
+    try {
+      const svc = ctx.get('pluginManager')
+      return svc && typeof svc.listPlugins === 'function' ? svc : undefined
+    } catch {
+      return undefined
+    }
+  }
+  let strictRow = { found: false, enabled: false, entryId: undefined }
+  let strictRowAt = 0
+  const refreshStrictRow = async () => {
+    strictRowAt = Date.now()
+    try {
+      strictRow = await strictRowState(pluginManager())
+    } catch { /* 保持旧值 */ }
+    return strictRow
+  }
+  const strictRowNow = () => {
+    if (Date.now() - strictRowAt > 1500) void refreshStrictRow()
+    return strictRow
   }
 
   /* ---- 会话 / 请求文字 ---- */
@@ -364,9 +464,10 @@ export function apply(ctx, config) {
    */
   const requestGate = (sessionId) => {
     const text = requestTextOf(sessionId)
-    // 字体档：strictFonts 全局强制，或本条请求里提到「严格公文格式」
+    // 字体档：组件行启用态（持久）或本会话说过请求词（临时）——两者取或
     const strictHit = matchKeyword(text, cfg.strictKeywords)
-    const profile = cfg.strictFonts || strictHit ? 'strict' : 'standard'
+    if (strictHit) markSessionStrict(sessionId)
+    const profile = strictOn(strictRowNow(), sessionId) ? 'strict' : 'standard'
     if (cfg.triggerKeywords.length === 0) return { mode: 'full', text, profile, strictHit }
     const trigger = matchKeyword(text, cfg.triggerKeywords)
     if (trigger) return { mode: 'full', text, trigger, profile, strictHit }
@@ -466,6 +567,8 @@ export function apply(ctx, config) {
       fonts: { type: 'object', additionalProperties: true },
       consentRequired: { type: 'object', additionalProperties: true },
       installed: { type: 'array', items: { type: 'object', additionalProperties: true } },
+      enabled: { type: 'boolean' },
+      strictRow: { type: 'object', additionalProperties: true },
     },
     required: ['ok', 'path', 'mode', 'changed', 'violations'],
     additionalProperties: true,
@@ -526,6 +629,12 @@ export function apply(ctx, config) {
       }
       return [{ type: 'text', text: lines.join('\n') }]
     }
+    /* ---- 配置开关 ---- */
+    if (value?.mode === 'config') {
+      lines.push('[' + (value.ok ? 'OK' : 'FAIL') + '] 配置 — 「严格公文格式」组件行'
+        + (value.enabled ? '已打开' : '已关闭'))
+      return [{ type: 'text', text: lines.join('\n') }]
+    }
     if (value?.skipped > 0 && files.length <= 1) {
       lines.push('[SKIP] ' + value.path + ' — 白名单命中，未处理（' + (value.skipReason ?? '') + '）')
       return [{ type: 'text', text: lines.join('\n') }]
@@ -581,27 +690,50 @@ export function apply(ctx, config) {
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '要处理的 .docx 文件或目录（绝对路径最稳）。mode=fonts/installFonts 时可省略。' },
-        mode: { type: 'string', enum: ['apply', 'check', 'fonts', 'installFonts'], description: 'apply=规范化并写回；check=只体检；fonts=只报告字体；installFonts=按授权安装字体。默认 apply。' },
+        path: { type: 'string', description: '要处理的 .docx 文件或目录（绝对路径最稳）。mode=fonts/installFonts/config 时可省略。' },
+        mode: { type: 'string', enum: ['apply', 'check', 'fonts', 'installFonts', 'config'], description: 'apply=规范化并写回；check=只体检；fonts=只报告字体；installFonts=按授权安装字体；config=开关「严格公文格式」组件行。默认 apply。' },
         recursive: { type: 'boolean', description: 'path 是目录时是否递归子目录。默认 false。' },
         force: { type: 'boolean', description: '忽略请求触发词强制处理。默认 false。' },
         confirm: { type: 'string', description: 'mode=installFonts 时必填：mode=fonts 返回的 consentRequired.token，原样传回。' },
         preset: { type: 'string', description: 'mode=installFonts 可选：gongwen（普通档）/ gongwen-strict（严格档）。' },
         fromZip: { type: 'string', description: 'mode=installFonts 可选：字体包 zip 的 URL 或本地路径。' },
+        enabled: { type: 'boolean', description: 'mode=config 时必填：true=把「严格公文格式」组件行打开（持久，重启仍生效），false=关掉。写的正是插件页那颗开关。' },
       },
       required: [],
       additionalProperties: false,
     },
     output: { schema: outputSchema, render: (_args, value) => renderReport(value) },
     async execute(args, exec) {
-      const known = new Set(['path', 'mode', 'recursive', 'force', 'confirm', 'preset', 'fromZip'])
+      const known = new Set(['path', 'mode', 'recursive', 'force', 'confirm', 'preset', 'fromZip', 'enabled'])
       for (const key of Object.keys(args ?? {})) {
         if (!known.has(key)) throw new Error('docx_format: 未知参数 ' + key)
       }
       const requested = typeof args?.mode === 'string' ? args.mode : 'apply'
-      const mode = ['check', 'fonts', 'installFonts'].includes(requested) ? requested : 'apply'
+      const mode = ['check', 'fonts', 'installFonts', 'config'].includes(requested) ? requested : 'apply'
       const gate = args?.force === true ? undefined : requestGate(exec?.agent?.id)
       const profile = gate?.profile === 'strict' ? 'strict' : undefined
+
+      /* ---- 配置：切「严格公文格式」组件行（与插件页那颗开关同一个后端） ---- */
+      if (mode === 'config') {
+        if (typeof args?.enabled !== 'boolean') {
+          throw new Error('docx_format: mode=config 需要布尔参数 enabled')
+        }
+        const result = await setStrictRow(pluginManager(), args.enabled)
+        if (result.ok) await refreshStrictRow()
+        log('info', '[docx-format] config enabled=' + args.enabled + ' ok=' + result.ok
+          + (result.ok ? '' : ' reason=' + result.reason))
+        if (!result.ok) throw new Error('docx_format: 切换「严格公文格式」组件行失败 — ' + (result.reason ?? 'unknown'))
+        return stripUndefined({
+          ok: true,
+          path: '(配置)',
+          mode,
+          changed: 0,
+          violations: 0,
+          enabled: result.enabled,
+          strictRow: strictRow,
+          message: '「严格公文格式」组件行已' + (result.enabled ? '打开' : '关闭') + '，下一次格式化生效',
+        })
+      }
 
       /* ---- 字体：只报告 ---- */
       if (mode === 'fonts') {
@@ -809,24 +941,33 @@ export function apply(ctx, config) {
     '- 正文：仿宋 三号(16pt)，两端对齐。一级标题 黑体三号、二级 楷体三号、三级 仿宋三号，',
     '  编号形如「一、」「（一）」「1．」（全角点，序号后不加空格）。',
     '- 数字与字母一律 Times New Roman；破折号「——」用 TNR；时间冒号半角。',
-    '- 页边距：上 3.6cm / 下 3.0cm / 左 2.7cm / 右 2.7cm。',
+    '- 页边距：上 3.6cm / 下 3.0cm / 左 2.7cm / 右 2.7cm；纸张 A4（21.0×29.7cm），不要留源文档的 Letter/B5。',
+    '- 主送机关（「各学院、各学生组织：」这类称呼）**顶格书写、不缩进**，左对齐；它上面的空行同样顶格。',
+    '- 正文（含落款）与附件之间、附件与附件之间用**分页符**断开（`w:br w:type="page"`），',
+    '  不要用段落属性 `w:pageBreakBefore` —— 那属于「换行和分页」六项，必须保持关闭。',
     '',
     '### 表格',
-    '- 表标题：方正小标宋简体 二号，居中，固定 29 磅；表标题与表格之间插一行空段（行高最小值 0、字号 5 号/10.5pt）。',
+    '- 表标题：方正小标宋简体 二号，居中，固定 29 磅；表标题与表格之间插一行空段（行距=最小值 0 磅、字号 5 号/10.5pt）。',
+    '  这个空段只能有**一个** `w:spacing`：重复写两个时 Word 只认最后一个，看起来「设了 0 磅却还是 12 磅」。',
+    '- **正文与表标题之间不留空行**：规范只要求「表标题与表格之间空一行」，表格前面多敲的回车要删掉（规则 `table.captionBlankBefore`，期望 0 行）。',
     '- 表头 黑体小四(12pt)，表内容 仿宋小四(12pt)；两字词语中间加两个半角空格（`姓  名`）。',
     '- **每一个单元格的每一段都水平居中**（含表头和内容，`w:jc w:val="center"`），并清掉单元格内的左/右/首行缩进；',
     '  单元格垂直居中（`w:vAlign w:val="center"`），段落单倍行距。只居中表头不算合规。',
-    '- 表格整体居中、无文字环绕；外边框 1.5 磅、内边框 0.5 磅；行高最小值 0.7cm。',
+    '- 表格整体居中、无文字环绕（不写 `w:tblpPr`）；外边框 1.5 磅、内边框 0.5 磅；行高最小值 0.7cm。',
+    '- 列宽固定：`w:tblLayout w:type="fixed"`，整表宽 = 版心 − 2×0.19cm（A4 下约 15.22cm），左缩进 0，',
+    '  不允许宽过版心或整体右移；单元格自带的 `w:tcBorders` 会把外框撑成 1.5 磅，必须先删掉。',
     '',
     '### 图片',
     '- 图片单独成段（不要和正文挤在同一段）：**居中**（`w:jc w:val="center"`）、**无缩进**（首行/左/右/悬挂全 0）、**单倍行距**',
     '  （`w:line="240" w:lineRule="auto"`，不要套 29 磅固定值），段前段后仍为 0 磅。',
-    '- 图片宽度不超过版心（15.6cm）；图注若需要，另起一段居中写「图 1  xxx」。',
+    '- 图片宽度不超过版心（15.6cm）；图注另起一段：「图 1  xxx」，仿宋 10.5pt、居中、无首行缩进。',
     '',
     '### 落款（默认不写）',
     '- **用户没有明确要求署名/日期时，一律不生成落款段落**，写完正文就结束，不要自拟单位名、不要编日期。',
-    '- 用户明确要求落款时才写：正文后空两行（两个空段落），右对齐；',
-    '  日期写「2026年10月27日」并在末尾留两个全角空格；署名与日期右边缘对齐（需盖章时署名居中于日期）。',
+    '- 用户明确要求落款时才写：正文后空两行（两个空段落），右对齐；日期写「2026年10月27日」，行尾补两个全角空格（真字符）。',
+    '  署名行尾补的全角空格数 = 2 + (日期宽 − 署名宽) + 2（**无需盖章**，署名首字比日期首字往左偏两个全角字）；',
+    '  需盖章时 = 2 + (日期宽 − 署名宽)/2（署名与日期中心轴对齐）；署名比日期还宽时空格收敛为 0。',
+    '  两段都必须写 `w:wordWrap="0"`（否则右对齐会忽略行尾空格，补了也白补），并关掉 `w:autoSpaceDE/DN`（否则日期实际宽度偏大、空格数算少）。',
     '',
     '### 其它',
     '- 页码：页脚居中「— 1 —」，宋体四号(14pt)，两侧破折号各留一个空格。',
@@ -835,11 +976,15 @@ export function apply(ctx, config) {
     '  第 1 段 2 字符（「附件：1．」行首）、第 2 段 6 字符（上一段的折行续行）、第 3 段 5 字符（「2．」）、第 4 段 6 字符……',
     '  折行点由 Word 排版实测得到（`Range.Information(wdFirstCharacterLineNumber)`），插件会自动把长条目拆成多段；',
     '  引擎（Word/WPS）不可用时退回“首行缩进 2/5 字符、不自动拆段”，折行留给使用者手工换行。',
-    '  文件末尾「附件1」黑体三号、无缩进、无冒号，其下与附件标题空一行。',
+    '  文件末尾「附件1」黑体三号、无缩进、无冒号，其下空一行后接附件标题（方正小标宋二号、居中）。',
     '',
     '### 字体',
-    '- 两档字体：普通档 方正小标宋简体 / 仿宋 / 黑体 / 楷体；严格档（请求里出现「严格公文格式」）',
-    '  方正小标宋_GBK / 仿宋_GB2312 / 方正黑体_GBK / 楷体_GB2312。数字与字母一律 Times New Roman。',
+    '- 默认用的是**普通档**：方正小标宋简体 / 仿宋 / 黑体 / 楷体——不是 GBK/GB2312 那一套。',
+    '- 严格档是 方正小标宋_GBK / 仿宋_GB2312 / 方正黑体_GBK / 楷体_GB2312，两个入口：',
+    '  ① 插件页「包含的组件」里「严格公文格式」那一行的启用态（持久，重启仍生效）；',
+    '  ② 用户在本会话里说过「严格公文格式」——只在**当前对话**内生效，不切那行、不改配置，换会话或重启恢复普通档。',
+    '- 用户要求打开/关闭严格档时，调 docx_format(mode="config", enabled=true|false)，写的就是那颗开关。',
+    '- 数字与字母一律 Times New Roman，两档都一样。',
     '- 不要凭印象说「你缺某字体」：要判断就调 docx_format(mode="fonts")，它返回缺哪几个、约几 MB、从哪下。',
     '- 缺字体只做一件事：把返回的 consentRequired 讲清楚（缺几个、约几 MB、来源），',
     '  问用户一句「要不要现在下载安装」；用户明确同意后，才调 docx_format(mode="installFonts", confirm=<token>)。',
@@ -854,6 +999,10 @@ export function apply(ctx, config) {
     '  （`w:widowControl="0"`、`w:keepNext="0"`、`w:keepLines="0"`、`w:pageBreakBefore="0"`、',
     '  `w:suppressLineNumbers="0"`、`w:suppressAutoHyphens="0"`）。',
     '- 中文里不要用「」『』当引号，一律用“”‘’（「」只出现在讲格式规则的说明文字里）。',
+    '- 文本级细节（一律处理）：时间冒号半角（`9：30` → `9:30`）、小数点半角（`1．5` → `1.5`）、',
+    '  单独成段的日期统一成 `2024年10月27日`、文末「附件1：」去掉冒号、字符间距取「标准」（不写 `w:spacing/@w:char`）。',
+    '- 段落不要挂网格：`w:snapToGrid w:val="0"`，否则行距会被文档网格改写。',
+    '- 一个段落只能有一个 `w:spacing`（重复的会被 Word 的后一个覆盖，也是「行距设了没生效」的常见原因）。',
     '- 中英混排：见下一节。',
     '',
     '### 中英混排（与是否公文无关，一律适用）',
@@ -868,6 +1017,21 @@ export function apply(ctx, config) {
     '- 要读 .docx 正文，调用 `docx_read`（path=绝对路径）。不要用 read 工具（会报 binary file），',
     '  不要 pip install python-docx，不要上网搜。长文档用返回的 next_offset 续读。',
   ].join('\n')
+
+  /* -------------------- 启动：读一次「严格公文格式」组件行 -------------------- */
+
+  void refreshStrictRow().then((row) => {
+    log('info', '[docx-format] strictRow found=' + row.found + ' enabled=' + row.enabled)
+  })
+
+  /* 一次性迁移：v1.3.1 及以前的配置项 strictFonts 已删除，值 true 时转成组件行启用态。 */
+  if (config?.strictFonts === true) {
+    void setStrictRow(pluginManager(), true).then((res) => {
+      log('info', '[docx-format] 迁移：配置 strictFonts=true → 组件行启用态 '
+        + (res.ok ? 'ok' : 'failed(' + (res.reason ?? 'unknown') + ')'))
+      if (res.ok) void refreshStrictRow()
+    })
+  }
 
   if (cfg.tool.enabled) {
     ctx.inject(['tools'], (scope) => {
@@ -926,6 +1090,5 @@ export function apply(ctx, config) {
     + ' autoFormat=' + cfg.autoFormat
     + ' trigger=' + JSON.stringify(cfg.triggerKeywords)
     + ' strict=' + JSON.stringify(cfg.strictKeywords)
-    + ' strictFonts=' + cfg.strictFonts
     + ' fontCheck=' + cfg.fontCheck.enabled)
 }

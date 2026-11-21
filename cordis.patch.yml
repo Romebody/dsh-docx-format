@@ -29,10 +29,9 @@
         # 没命中触发词时仍做全局规范化：分页六项全关、中文引号换“”、中文里英文前后不留空格
         # 置成 false 则彻底不碰文件（旧行为）
         globalNormalize: true
-        # 字体档：false = 普通档（方正小标宋简体/仿宋/黑体/楷体）
-        #         true  = 一律严格档（方正小标宋_GBK/仿宋_GB2312/方正黑体_GBK/楷体_GB2312）
-        strictFonts: false
-        # 请求里出现这些词时改用严格档字体（strictFonts: true 时不必写）
+        # 字体档的持久真源只有一个：下面「严格公文格式」组件行的启用态。
+        # 这里不再有 strictFonts 开关（v1.3.2 删除；旧配置写了 true 会在启动时自动迁移成组件行启用态）。
+        # 请求里出现这些词时，只在本会话内临时切严格档：不切组件行、不写配置，重启或换会话即恢复普通档。
         strictKeywords:
           - '严格公文格式'
           - '严格公文'
@@ -48,6 +47,25 @@
           enabled: true
         # 覆盖 docxfmt.py 的 DEFAULTS，例如：
         # defaults:
+        #   # 纸张：'A4'（默认，规范要求）或 'keep'（保留源文档原纸张）
+        #   pageSize: 'A4'
         #   linePt: 28
+        #   # 文本级规范开关（v1.3.3），全部默认开；不需要哪条就置 false
+        #   normalize:
+        #     charSpacing: true      # 字符间距「标准」
+        #     timeColon: true        # 时间冒号半角（9：30 → 9:30）
+        #     numberHalfDot: true    # 小数点全角点 → 半角（1．5 → 1.5）
+        #     attachTagColon: true   # 末尾「附件1：」去掉冒号
+        #     dateFormat: true       # 单独成段的日期统一成 2024年10月27日
+        #     paginationOff: true    # 分页六项全关
+        #     quotePair: true        # 「」→ “”
+        #     cjkLatinSpace: true    # 中文里英文前后不留空格
         #   signature:
         #     seal: true
+    # 「严格公文格式」组件行：插件页「包含的组件」里自有的一行，行尾那颗开关就是严格档总开关。
+    # 它同时是严格档的**持久真源**：开关打开 = Loader 里这条 insert 启用 = 一律严格档。
+    # 要长期关掉严格档，也可以在这里写 disabled: true（等于把那颗开关锁死在关闭）。
+    # 必须指向独立包 dsh-docx-format-strict —— 组件行的标题/描述取自被引用包的 locale/{zh,en}.json
+    # 的 meta.*，与主插件共用一份 locale 会把两行写成同一个标题。
+    - id: docx-format-strict
+      name: 'dsh-docx-format-strict'

@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "title": "Strict document fonts",
+    "description": "When enabled, formatting uses the GB2312 font tier: 方正小标宋_GBK / 仿宋_GB2312 / 方正黑体_GBK / 楷体_GB2312. When disabled (the default) it uses the standard tier: 方正小标宋简体 / 仿宋 / 黑体 / 楷体. This row is the only persistent switch for the strict tier and survives a restart; saying 严格公文格式 in a conversation applies to that session only."
+  },
+  "title": "Strict document fonts",
+  "rowHint": "Enabled = GB2312 tier; disabled = standard tier (方正小标宋简体 / 仿宋 / 黑体 / 楷体)"
+}
