@@ -49,13 +49,15 @@ DEFAULTS = {
         "h1": "黑体",
         "h2": "楷体",
         "h3": "仿宋",
+        # 副标题：楷体三号（按《有趣的公文格式》要求；旧版本曾用仿宋）
+        "subtitle": "楷体",
         "latin": "Times New Roman",
         "footer": "宋体",
         "tableHead": "黑体",
         "tableBody": "仿宋",
         "tableCaption": "方正小标宋简体",
     },
-    "sizes": {"title": 22, "body": 16, "table": 12, "footer": 14, "spacer": 10.5,
+    "sizes": {"title": 22, "body": 16, "table": 12, "footer": 14, "spacer": 5,
               "figCaption": 10.5},
     "linePt": 29,
     # 首行缩进以“字符”为单位（w:firstLineChars），不用磅值
@@ -108,6 +110,7 @@ DEFAULTS = {
         "h1": "方正黑体_GBK",
         "tableHead": "方正黑体_GBK",
         "h2": "楷体_GB2312",
+        "subtitle": "楷体_GB2312",
         "footer": "宋体",
     },
     # 字体检测与安装。检测只读注册表/字体目录，**从不联网**；
@@ -124,6 +127,9 @@ DEFAULTS = {
         "fullwidthNumberDot": True,
         "twoCharCellSpace": True,
         "dashFont": True,
+        # 中文标点（“”‘’…）与单个时间连字符「—」落仿宋：Word 把这类「东亚/西文
+        # 宽度歧义」字符按 ascii 字体渲染，不单独拆 run 就会跑进 Times New Roman。
+        "punctFont": True,
         "boldOff": True,
         # 中文内容里英文前后不留空格（「使用AI工具」）；纯英文语句的空格保持原样
         "cjkLatinSpace": True,
@@ -325,12 +331,126 @@ def set_run(run, font, size, latin, report, where, cfg):
                         (lambda ff=f: setattr(ff, "highlight_color", None)))
 
 
+# 需要落仿宋的中文标点：Word 把这类「东亚/西文宽度歧义」字符按 ascii 字体渲染，
+# 整段共用 TNR 时引号、省略号会跟着跑进 Times New Roman，必须切出来单独设字体。
+CJK_PUNCT_RUN = set("“”‘’…—·")
+
+
+def _punct_segments(text):
+    """把文本切成 [(片段, 是否标点)]。
+
+    单个「—」算标点（时间区间 `8:30—17:30`）；连续 ≥2 个「—」是公文破折号，
+    不算标点，留给 dashFont 设 Times New Roman。
+    """
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ("—", "－"):
+            j = i
+            while j < n and text[j] in ("—", "－"):
+                j += 1
+            seg, is_punct = text[i:j], (j - i == 1)
+            i = j
+        else:
+            seg, is_punct = ch, ch in CJK_PUNCT_RUN
+            i += 1
+        if out and out[-1][1] == is_punct:
+            out[-1] = [out[-1][0] + seg, is_punct]
+        else:
+            out.append([seg, is_punct])
+    return [(s, p) for s, p in out]
+
+
+def _set_rfonts_all(r_el, font):
+    rPr = r_el.find(qn("w:rPr"))
+    if rPr is None:
+        rPr = OxmlElement("w:rPr")
+        r_el.insert(0, rPr)
+    rf = rPr.find(qn("w:rFonts"))
+    if rf is None:
+        rf = OxmlElement("w:rFonts")
+        rPr.insert(0, rf)
+    for attr in ("w:ascii", "w:hAnsi", "w:eastAsia", "w:cs"):
+        rf.set(qn(attr), font)
+
+
+def _punct_font_ok(run, body):
+    rPr = run._element.find(qn("w:rPr"))
+    rf = None if rPr is None else rPr.find(qn("w:rFonts"))
+    if rf is None:
+        return False
+    return rf.get(qn("w:ascii")) == body and rf.get(qn("w:eastAsia")) == body
+
+
+def _apply_punct_split(par, cfg):
+    """把含标点的 run 拆成「标点 run（仿宋）」+「其余 run（保持原字体）」。"""
+    body = cfg["fonts"]["body"]
+    for run in list(par.runs):
+        text = run.text or ""
+        if not text:
+            continue
+        segs = _punct_segments(text)
+        if len(segs) == 1:
+            if segs[0][1]:
+                _set_rfonts_all(run._element, body)
+            continue
+        el = run._element
+        rPr_src = el.find(qn("w:rPr"))
+        anchor = el
+        for seg_text, is_punct in segs:
+            r = OxmlElement("w:r")
+            if rPr_src is not None:
+                r.append(copy.deepcopy(rPr_src))
+            if is_punct:
+                _set_rfonts_all(r, body)
+            t = OxmlElement("w:t")
+            t.set(qn("xml:space"), "preserve")
+            t.text = seg_text
+            r.append(t)
+            anchor.addnext(r)
+            anchor = r
+        el.getparent().remove(el)
+
+
+def _split_punct_runs(par, report, label, cfg):
+    body = cfg["fonts"]["body"]
+    for run in list(par.runs):
+        text = run.text or ""
+        if not text:
+            continue
+        segs = _punct_segments(text)
+        if len(segs) == 1:
+            seg_text, is_punct = segs[0]
+            if is_punct and not _punct_font_ok(run, body):
+                report.want(
+                    "run.punctFont", label,
+                    "标点「%s」字体不是%s" % (seg_text[:3], body),
+                    "%s（中文标点用仿宋）" % body,
+                    (lambda p=par, c=cfg: _apply_punct_split(p, c)))
+            continue
+        report.want(
+            "run.punctFont", label,
+            "标点与文字共用同一个 run「%s」" % text[:10],
+            "标点独立成 run 并用%s" % body,
+            (lambda p=par, c=cfg: _apply_punct_split(p, c)))
+
+
 def style_runs(par, font, size, latin, report, label, cfg):
+    if cfg["normalize"].get("punctFont", True):
+        _split_punct_runs(par, report, label, cfg)
+    punct_on = cfg["normalize"].get("punctFont", True)
+    body_latin = cfg["fonts"]["body"]
     for idx, run in enumerate(par.runs):
         where = "%s#r%d" % (label, idx)
-        if (cfg["normalize"]["dashFont"] and run.text
-                and set(run.text) <= {"—", "－"} and run.text.strip()):
-            # 破折号用 Times New Roman
+        txt = (run.text or "").strip()
+        if punct_on and txt and set(txt) <= CJK_PUNCT_RUN:
+            # 中文标点（含单个时间连字符）：ascii 也写仿宋，否则 Word 会按 ascii
+            # 字体把 “”‘’… 画成 Times New Roman
+            set_run(run, body_latin, size, body_latin, report, where, cfg)
+        elif (cfg["normalize"]["dashFont"] and txt and set(txt) <= {"—", "－"}
+                and len(txt) >= 2):
+            # 公文破折号「——」用 Times New Roman
             set_run(run, latin, size, latin, report, where, cfg)
         else:
             set_run(run, font, size, latin, report, where, cfg)
@@ -585,7 +705,7 @@ def style_par(par, kind, report, label, cfg):
         report.stats["para.blank"] += 1
         if not _spacer_props_ok(par._p, cfg):
             report.want("table.captionSpacer", label, "空行行高/字号不符",
-                        "行高最小值 0 磅、5 号字",
+                        "行高最小值 0 磅、5 磅字",
                         lambda: _write_spacer_props(par._p, cfg))
         return
 
@@ -601,8 +721,8 @@ def style_par(par, kind, report, label, cfg):
         want_align, want_font, want_size = CENTER, fonts["title"], sizes["title"]
         want_first_chars = None
     elif kind == "subtitle":
-        # 副标题：仿宋三号、居中、无首行缩进，行距仍固定 29 磅
-        want_align, want_font, want_size = CENTER, fonts["body"], sizes["body"]
+        # 副标题：楷体三号、居中、无首行缩进，行距仍固定 29 磅
+        want_align, want_font, want_size = CENTER, fonts["subtitle"], sizes["body"]
         want_first_chars = None
     elif kind == "table_caption":
         want_align, want_font, want_size = CENTER, fonts["tableCaption"], sizes["title"]
@@ -1891,7 +2011,7 @@ def _spacer_props_ok(p_el, cfg):
 
 
 def _write_spacer_props(p_el, cfg):
-    """行高最小值 0 磅、字号 5 号、段前段后 0 —— 表标题与表格之间那一行。"""
+    """行高最小值 0 磅、字号 5 磅、段前段后 0 —— 表标题与表格之间那一行。"""
     pPr = p_el.get_or_add_pPr()
     sp = _sole_spacing(p_el)
     for key in ("w:beforeLines", "w:afterLines",
@@ -1931,7 +2051,7 @@ def format_table_caption_spacer(items, kinds, report, cfg):
         if nxt is not None and nxt.tag == qn("w:p") and _is_blank_el(nxt):
             if not _spacer_props_ok(nxt, cfg):
                 report.want("table.captionSpacer", "table%d" % n,
-                            "空行行高/字号不符", "行高最小值 0 磅、5 号字",
+                            "空行行高/字号不符", "行高最小值 0 磅、5 磅字",
                             lambda e=nxt: _write_spacer_props(e, cfg))
             continue
         spacer = OxmlElement("w:p")
